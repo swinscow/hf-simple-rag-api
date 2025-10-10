@@ -1,0 +1,8 @@
+# .gitignore content
+venv/
+*.pyc
+__pycache__/
+# CRITICAL: DO NOT UPLOAD YOUR SECRETS!
+.env 
+local_chroma_db/
+temp_files/
