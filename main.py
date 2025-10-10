@@ -104,36 +104,44 @@ def check_for_general_intent(message: str, llm_instance: ChatDeepInfra) -> bool:
         print(f"Warning: LLM classification failed ({e}). Falling back to keyword search.")
         return any(keyword in message.lower() for keyword in ["only use the file", "only based on the file", "only use the document", "strictly only"])
 
+# main.py - Corrected create_vector_store (around Line 80)
+
 def create_vector_store(file_path: str):
     """Loads, chunks, embeds, and indexes the document into the PGVector database."""
     try:
-        # Load data (handles PDF)
+        # 1. Initialize embeddings *inside* the function (Lazy Loading)
+        # We must initialize the embeddings here to pass to the vector store.
+        embeddings = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL)
+
+        # 2. Load data and split
         loader = PyPDFLoader(file_path)
         documents = loader.load()
-
-        # Split text into chunks for better retrieval
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         splits = text_splitter.split_documents(documents)
 
-        # Create embeddings (runs locally)
-        embeddings = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL)
-
-        engine = create_engine(DB_URL)
-        
-        # Connect to PGVector (Supabase) and create the table/collection
-        # NOTE: This overrides the global vector_store object with the PGVector instance
+        # 3. CRITICAL: Use the standard PGVectorStore constructor with the engine
+        # We assume the engine object is now implicitly handled by the LangChain connector 
+        # (Since we are using the official PGVector class now).
+        # We are also forcing the table creation on first run here.
         global vector_store
-        vector_store = PGVector(
-            embeddings=embeddings,
+        vector_store = PGVector.from_documents(
+            documents=splits, 
+            embedding=embeddings, 
             collection_name=COLLECTION_NAME,
-            connection=engine,
-
+            connection=DB_URL  # <--- Use the string directly here
         )
-        # Add the documents to the vector store
-        vector_store.add_documents(documents=splits)
+        
+        # NOTE: PGVector.from_documents handles table creation and document insertion in one go.
+
+        # We will also create a new utility to connect for the non-RAG parts.
+        # This function should only be run once successfully.
         return True
+        
     except Exception as e:
         print(f"RAG creation failed: {e}")
+        # Log the internal error to the console (Render logs)
+        import logging
+        logging.error(f"FATAL DB CRASH: {e}", exc_info=True)
         return False
 
 def format_docs(docs):
