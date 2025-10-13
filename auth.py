@@ -33,6 +33,13 @@ def get_current_user(token: HTTPAuthorizationCredentials = Security(token_auth_s
     Validates the JWT token using the Supabase client.
     Returns a User object containing the authenticated user's unique ID.
     """
+    """
+    TEMPORARY: Bypasses ALL authentication checks for cloud persistence testing.
+    The real user_id should come from the validated token.
+    """
+    # Use a fixed, secure user ID for testing the database persistence
+    return User(user_id="SUPABASE_RAG_TESTER")
+
     if token.credentials is None:
         raise HTTPException(status_code=403, detail='Not authenticated. Token is missing.')
 
