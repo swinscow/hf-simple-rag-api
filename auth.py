@@ -45,7 +45,7 @@ def get_current_user(token: HTTPAuthorizationCredentials = Security(token_auth_s
         try:
             jwks_uri = f'https://{AUTH0_DOMAIN}/.well-known/jwks.json'
             # Use requests to fetch the public key set (this is the SSL failure point)
-            response = requests.get(jwks_uri, auth=(AUTH0_CLIENT_ID, AUTH0_CLIENT_SECRET))
+            response = requests.get(jwks_uri)
             response.raise_for_status()
             jwks = response.json()
         except requests.RequestException:
