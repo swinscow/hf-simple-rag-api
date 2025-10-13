@@ -1,32 +1,29 @@
-# main.py - CLOUD-READY VERSION WITH POSTGRES & PGVECTOR
+# main.py - FINAL PRODUCTION-READY API CODE (Cloud/Supabase/Auth0)
 
 # --- 1. Dependencies and Setup ---
 from fastapi import FastAPI, UploadFile, File, HTTPException, Security
 from pydantic import BaseModel, Field
-from dotenv import load_dotenv
-from contextlib import asynccontextmanager # <-- NEW CRITICAL IMPORT
+from dotenv import load_dotenv 
+from contextlib import asynccontextmanager 
+from sqlalchemy import create_engine
+from auth import get_current_user, User
 import logging
-from sqlalchemy import create_engine # NEW IMPORT
-from auth import get_current_user, User # <--- NEW IMPORT from your auth.py file
 import os
 import shutil
-import uuid
+from typing import Dict, List, Any
+from operator import itemgetter 
 
 # LangChain Components
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import SentenceTransformerEmbeddings
-from langchain_community.vectorstores import Chroma
 from langchain_deepinfra import ChatDeepInfra
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
-from operator import itemgetter 
-from langchain_postgres import PGVector, PostgresChatMessageHistory # <--- NEW DB IMPORTS
+from langchain_postgres import PGVector, PostgresChatMessageHistory 
 
-
-# main.py - Configuration & Initialization (FINAL CORRECTED BLOCK)
 
 # --- Pydantic Model for Intent Classification ---
 class GroundingDecision(BaseModel):
@@ -41,7 +38,7 @@ load_dotenv()
 
 # --- Model Definitions (User-Facing Name -> Deep Infra ID) ---
 MODEL_MAPPING = {
-    "fast-chat": "meta-llama/Meta-Llama-3-8B-Instruct",      # Fast and Cheap
+    "fast-chat": "meta-llama/Meta-Llama-3-8B-Instruct",
     "smart-chat": "meta-llama/Meta-Llama-3-70B-Instruct",
     "coding-expert": "codellama/CodeLlama-34b-Instruct-hf"
 }
@@ -51,22 +48,22 @@ EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
 COLLECTION_NAME = "rag_documents"
 
-# CRITICAL: Database connection setup
+# CRITICAL: Database connection setup (Reads PGVECTOR_CONNECTION_STRING from Render ENV)
 DB_URL = os.getenv("PGVECTOR_CONNECTION_STRING")
 if not DB_URL:
-    raise ValueError("DB_URL (PGVECTOR_CONNECTION_STRING) not found. Check your .env file!")
+    raise ValueError("DB_URL (PGVECTOR_CONNECTION_STRING) not found. Check Render ENV!")
 
 # CRITICAL: Deep Infra Authentication Setup
 deepinfra_key = os.getenv("DEEPINFRA_API_KEY")
 if not deepinfra_key:
-    raise ValueError("DEEPINFRA_API_KEY not found. Check your .env file!")
+    raise ValueError("DEEPINFRA_API_KEY not found. Check Render ENV!")
+
+# Set environment variables for LangChain compatibility
 os.environ['OPENAI_API_KEY'] = deepinfra_key 
 os.environ['OPENAI_API_BASE'] = DEEPINFRA_BASE_URL
 
-
 # Initialize DB connection pool engine (non-blocking)
 try:
-    # Use SQLAlchemy's engine object (non-blocking process)
     DB_ENGINE = create_engine(DB_URL.replace("+psycopg", "")) 
 except Exception as e:
     logging.critical(f"FATAL: Database Engine creation failed: {e}")
@@ -74,37 +71,46 @@ except Exception as e:
 
 vector_store = None 
 
-# --- FastAPI Lifespan Event (Crucial for Render Startup Fix) ---
+
+# --- 3. FastAPI Lifespan Event (The Cloud Crash Fix) ---
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logging.info("STARTUP: Running database initialization...")
+    logging.info("STARTUP: Application starting...")
     
     global vector_store
-    try:
-        # NOTE: We are intentionally loading the embedding model here
-        embeddings = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL) 
+    vector_store = None # Ensure global placeholder is set
 
-        # This initializes the connection and checks for the tables.
+    try:
+        # NOTE: We load the embedding model once here to satisfy the vector_store requirement 
+        embeddings = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL) 
+        
+        # We attempt to initialize PGVector by connecting to the existing table/collection
+        # This will fail gracefully if the table doesn't exist, which is handled in /upload_document
+        from langchain_postgres.vectorstores import PGVector
+        
+        # We need the vector store to be defined so the /chat endpoint can use the retriever
         vector_store = PGVector(
             embedding_function=embeddings,
             collection_name=COLLECTION_NAME,
             connection=DB_URL
         )
-        logging.info("DB Status: PGVector store initialized successfully.")
+        logging.info("DB Status: PGVector placeholder initialized successfully.")
 
     except Exception as e:
-        # This catches the connection failure or table creation errors
-        logging.error(f"FATAL: PGVector initialization failed: {e}")
-        vector_store = None 
+        # This catches errors like connection failure during startup, preventing a crash
+        logging.error(f"FATAL: PGVector initialization failed during startup. Indexing disabled until upload. Error: {e}")
+        vector_store = None # Ensure it is None if it failed
 
-    yield # Application ready!
+    # SERVER IS READY
+    yield 
 
     logging.info("SHUTDOWN: Application shutting down.")
 
 
-app = FastAPI(lifespan=lifespan) # <--- FINAL APP DECLARATION
+app = FastAPI(lifespan=lifespan) # <--- FINAL APP DECLARATION (MUST BE UNINDENTED)
 
-# --- New Simple Health Check Endpoint (Render will check this immediately) ---
+# --- New Simple Health Check Endpoint ---
 @app.get("/", include_in_schema=False)
 def health_check():
     """Render's internal health check."""
@@ -112,7 +118,7 @@ def health_check():
 
 
 # --- 4. Prompt Definitions ---
-# 1. STRICT RAG PROMPT
+# (Prompts for STRICT, FLEXIBLE, and PURE chat modes)
 STRICT_RAG_PROMPT = """
 You are an expert Q&A assistant. Your ONLY source of truth is the provided CONTEXT. 
 Answer the user's question ONLY based on the CONTEXT. 
@@ -129,8 +135,6 @@ QUESTION:
 """
 strict_prompt = ChatPromptTemplate.from_template(STRICT_RAG_PROMPT)
 
-
-# 2. FLEXIBLE RAG PROMPT
 FLEXIBLE_RAG_PROMPT = """
 You are a helpful assistant. Use the provided CONTEXT first to answer the question.
 If the CONTEXT is insufficient or empty, use your general knowledge to provide a comprehensive answer.
@@ -146,7 +150,6 @@ QUESTION:
 """
 flexible_prompt = ChatPromptTemplate.from_template(FLEXIBLE_RAG_PROMPT)
 
-# 3. PURE CHAT PROMPT
 PURE_CHAT_PROMPT = """
 You are a friendly and helpful general knowledge assistant. Use your knowledge to answer the user's question and maintain the conversation flow.
 
@@ -190,7 +193,7 @@ def check_for_general_intent(message: str, llm_instance: ChatDeepInfra) -> bool:
         decision = classification_chain.invoke({"message": message})
         return not decision.is_general_knowledge
     except Exception as e:
-        logging.error(f"LLM classification failed: {e}")
+        logging.error(f"LLM classification failed: {e}", exc_info=True)
         # Fallback to keyword search if the LLM classification fails
         return any(keyword in message.lower() for keyword in ["only use the file", "only based on the file", "only use the document", "strictly only"])
 
@@ -198,45 +201,44 @@ def create_vector_store(file_path: str):
     """Loads, chunks, embeds, and indexes the document into the PGVector database."""
     global vector_store
 
-    if DB_ENGINE is None:
-        # If DB initialization failed on startup, raise an error here
-        raise Exception("Database connection failed on startup. Cannot index.")
+    if vector_store is not None:
+        # CRITICAL: This is the first time the PGVector store is created.
+        # This will create the tables in Supabase.
+        logging.info("Re-initializing PGVector store for new indexing.")
+        try:
+            embeddings = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL)
 
-    try:
-        # Load data (handles PDF)
-        loader = PyPDFLoader(file_path)
-        documents = loader.load()
+            # 1. Load and split documents
+            loader = PyPDFLoader(file_path)
+            documents = loader.load()
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+            splits = text_splitter.split_documents(documents)
 
-        # Split text into chunks for better retrieval
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        splits = text_splitter.split_documents(documents)
+            # 2. Use the stable .from_documents method (Handles table creation/connection)
+            vector_store = PGVector.from_documents(
+                documents=splits, 
+                embedding=embeddings, 
+                collection_name=COLLECTION_NAME,
+                connection=DB_URL
+            )
+            logging.info("RAG Indexing SUCCESS: Documents added to PGVector.")
+            return True
+        except Exception as e:
+            logging.error(f"RAG creation failed during runtime: {e}", exc_info=True)
+            return False
+    else:
+        # This path should ideally not be hit after the lifespan event is run, but serves as a safety check
+        raise Exception("RAG indexing cannot proceed: Vector store was not initialized during startup.")
 
-        # Create embeddings (runs locally)
-        embeddings = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL)
-        
-        # CRITICAL: Use the stable .from_documents method to handle table creation
-        vector_store = PGVector.from_documents(
-            documents=splits, 
-            embedding=embeddings, 
-            collection_name=COLLECTION_NAME,
-            connection=DB_URL # Use the URL string for PGVector.from_documents
-        )
-        
-        return True
-    except Exception as e:
-        logging.error(f"RAG creation failed during runtime: {e}", exc_info=True)
-        return False
 
 def format_docs(docs):
     """Converts a list of documents into a single string for the prompt context."""
     return "\n\n".join(doc.page_content for doc in docs)
 
 
-# --- 6. FastAPI Endpoints ---
+# --- 7. FastAPI Endpoints ---
 
-# Updated Pydantic model for request body
 class ChatRequest(BaseModel):
-    user_id: str = "default_tester"
     conversation_id: str = "new_chat"
     model_key: str = "fast-chat"
     message: str
@@ -251,6 +253,7 @@ async def upload_document(file: UploadFile = File(...)):
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     
+    # CRITICAL: The create_vector_store function must run successfully here
     if create_vector_store(file_path):
         return {"message": f"Document '{file.filename}' uploaded and indexed successfully! Use the /chat endpoint now."}
     else:
@@ -265,7 +268,6 @@ async def chat_with_rag(
 ):
     global vector_store
     
-    # User ID is securely retrieved from the token:
     user_id = current_user.user_id 
 
     # 1. Initialization and History Retrieval
@@ -280,7 +282,6 @@ async def chat_with_rag(
     if vector_store is not None:
         # --- RAG MODE (Document Available) ---
         
-        # Determine strictness by checking LLM's intent classification
         is_strict = check_for_general_intent(request.message, llm_instance)
         
         selected_prompt = strict_prompt if is_strict else flexible_prompt
@@ -359,7 +360,6 @@ def get_history(
     user_id = current_user.user_id
     session_id = f"{user_id}_{conversation_id}"
     
-    # CRITICAL: We initialize a *new* history manager for read access
     history_manager = PostgresChatMessageHistory(connection_string=DB_URL, session_id=session_id)
     
     messages_list = [{"type": msg.type, "content": msg.content} for msg in history_manager.messages]
