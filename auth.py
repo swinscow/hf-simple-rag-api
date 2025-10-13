@@ -8,6 +8,12 @@ from jose import jwt
 from pydantic import BaseModel
 import requests
 import os
+import certifi
+import ssl
+
+# CRITICAL FIX: Force requests/urllib3 to use the updated certificate chain
+# This overrides the system's potentially broken chain.
+CERTIFICATE_BUNDLE_PATH = certifi.where()
 
 # 1. Configuration (Reads from your .env file)
 AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN")
@@ -38,7 +44,7 @@ def get_current_user(token: HTTPAuthorizationCredentials = Security(token_auth_s
     if jwks is None:
         try:
             jwks_uri = f'https://{AUTH0_DOMAIN}/.well-known/jwks.json'
-            response = requests.get(jwks_uri)
+            response = requests.get(jwks_uri, verify=CERTIFICATE_BUNDLE_PATH) 
             response.raise_for_status()
             jwks = response.json()
         except requests.RequestException as e:
