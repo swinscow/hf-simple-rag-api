@@ -106,42 +106,37 @@ def check_for_general_intent(message: str, llm_instance: ChatDeepInfra) -> bool:
 
 # main.py - Corrected create_vector_store (around Line 80)
 
+# main.py - Inside create_vector_store(file_path: str) (CRITICAL REPLACEMENT)
+
 def create_vector_store(file_path: str):
     """Loads, chunks, embeds, and indexes the document into the PGVector database."""
+    global vector_store
+    
     try:
-        # 1. Initialize embeddings *inside* the function (Lazy Loading)
-        # We must initialize the embeddings here to pass to the vector store.
-        embeddings = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL)
-
-        # 2. Load data and split
+        # 1. Load and split documents (Local CPU/RAM work)
         loader = PyPDFLoader(file_path)
         documents = loader.load()
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         splits = text_splitter.split_documents(documents)
 
-        # 3. CRITICAL: Use the standard PGVectorStore constructor with the engine
-        # We assume the engine object is now implicitly handled by the LangChain connector 
-        # (Since we are using the official PGVector class now).
-        # We are also forcing the table creation on first run here.
-        global vector_store
+        # 2. Embeddings (Local CPU work)
+        embeddings = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL)
+        
+        # 3. CRITICAL FIX: Use the stable .from_documents method
+        # This method is more reliable at handling table creation on first run.
         vector_store = PGVector.from_documents(
             documents=splits, 
             embedding=embeddings, 
             collection_name=COLLECTION_NAME,
-            connection=DB_URL  # <--- Use the string directly here
+            connection=DB_URL, # Use the URL string directly, which is sometimes simpler
+            pre_delete_collection=True # Ensures we can restart cleanly after a deploy
         )
         
-        # NOTE: PGVector.from_documents handles table creation and document insertion in one go.
-
-        # We will also create a new utility to connect for the non-RAG parts.
-        # This function should only be run once successfully.
         return True
-        
     except Exception as e:
-        print(f"RAG creation failed: {e}")
-        # Log the internal error to the console (Render logs)
+        # Log the error, but allow the server to proceed if possible
         import logging
-        logging.error(f"FATAL DB CRASH: {e}", exc_info=True)
+        logging.error(f"FATAL RAG DB CRASH: {e}")
         return False
 
 def format_docs(docs):
