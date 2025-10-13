@@ -16,6 +16,7 @@ load_dotenv()
 AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN")
 AUTH0_CLIENT_ID = os.getenv("AUTH0_CLIENT_ID") 
 # We need to rely on the library reading these variables implicitly or via fetch
+AUTH0_CLIENT_SECRET = os.getenv("AUTH0_CLIENT_SECRET")
 
 # Define the security scheme and User model
 token_auth_scheme = HTTPBearer()
