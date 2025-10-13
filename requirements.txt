@@ -33,7 +33,6 @@ httpcore==1.0.9
 httptools==0.6.4
 httpx==0.28.1
 httpx-sse==0.4.2
-huggingface-hub==0.35.3
 humanfriendly==10.0
 idna==3.10
 importlib_metadata==8.7.0
@@ -139,3 +138,4 @@ websockets==15.0.1
 yarl==1.22.0
 zipp==3.23.0
 zstandard==0.25.0
+
