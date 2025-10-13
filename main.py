@@ -91,7 +91,7 @@ async def lifespan(app: FastAPI):
         
         # We need the vector store to be defined so the /chat endpoint can use the retriever
         vector_store = PGVector(
-            embedding_function=embeddings,
+            embeddings=embeddings,
             collection_name=COLLECTION_NAME,
             connection=DB_URL
         )
