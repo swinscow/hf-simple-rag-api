@@ -97,7 +97,6 @@ pyproject_hooks==1.2.0
 pyreadline3==3.5.4
 python-dateutil==2.9.0.post0
 python-dotenv==1.1.1
-python-jose==3.5.0
 python-multipart==0.0.20
 PyYAML==6.0.3
 referencing==0.36.2
@@ -138,4 +137,5 @@ websockets==15.0.1
 yarl==1.22.0
 zipp==3.23.0
 zstandard==0.25.0
+python-jose[cryptography]==3.5.0
 
