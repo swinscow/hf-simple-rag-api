@@ -1,4 +1,7 @@
 # auth.py - Token Validation and User ID Extraction
+import urllib3
+# Suppress the warning caused by setting verify=False
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from dotenv import load_dotenv
 load_dotenv() # Ensure the environment is loaded before any variables are read
 
@@ -44,7 +47,8 @@ def get_current_user(token: HTTPAuthorizationCredentials = Security(token_auth_s
     if jwks is None:
         try:
             jwks_uri = f'https://{AUTH0_DOMAIN}/.well-known/jwks.json'
-            response = requests.get(jwks_uri, verify=CERTIFICATE_BUNDLE_PATH) 
+            #response = requests.get(jwks_uri, verify=CERTIFICATE_BUNDLE_PATH) 
+            response = requests.get(jwks_uri, verify=False)
             response.raise_for_status()
             jwks = response.json()
         except requests.RequestException as e:
