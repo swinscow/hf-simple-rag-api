@@ -13,15 +13,6 @@ import shutil
 from typing import Dict, List, Any
 from operator import itemgetter 
 
-# CRITICAL HACK TO BYPASS STUBBORN SSL HANDSHAKE FAILURES
-# This disables verification for ALL HTTPS requests made by Python
-import ssl
-import requests
-from requests.packages.urllib3.exceptions import InsecureRequestWarning
-requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
-ssl._create_default_https_context = ssl._create_unverified_context
-# END CRITICAL HACK
-
 # LangChain Components
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
