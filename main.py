@@ -274,7 +274,7 @@ async def chat_with_rag(
     history_manager = RedisChatMessageHistory(
         session_id=session_id, 
         key_prefix=user_id,
-        client=REDIS_CLIENT_INSTANCE # Uses the global client
+        redis_client=REDIS_CLIENT_INSTANCE # Uses the global client
     )
     
     history_messages = history_manager.messages
