@@ -203,7 +203,7 @@ def create_vector_store(file_path: str):
 
     try:
         # CRITICAL FIX: Use the global embedding instance loaded in the lifespan
-        embeddings = EMBEDDINGS_INSTANCE 
+        embeddings = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL)
         
         # Load and split documents
         loader = PyPDFLoader(file_path)
@@ -255,7 +255,7 @@ async def upload_document(file: UploadFile = File(...)):
 @app.post("/chat")
 async def chat_with_rag(
     request: ChatRequest, 
-    current_user: User = Security(get_current_user) 
+    #current_user: User = Security(get_current_user) 
 ):
     global vector_store
     global REDIS_CLIENT_INSTANCE
