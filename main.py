@@ -258,13 +258,11 @@ async def upload_document(file: UploadFile = File(...)):
 @app.post("/chat")
 async def chat_with_rag(
     request: ChatRequest, 
-    current_user: User = Security(get_current_user) 
+    # current_user: User = Security(get_current_user) 
 ):
     global vector_store
-    global REDIS_CLIENT_INSTANCE # CRITICAL: Access the global client
 
-    # User ID is securely retrieved from the token:
-    user_id = current_user.user_id 
+    user_id = "SUPABASE_REDIS_TESTER"
 
     # 1. Initialization and History Retrieval (FIXED: Uses Redis)
     session_id = f"{user_id}_{request.conversation_id}"
