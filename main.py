@@ -280,7 +280,7 @@ async def chat_with_rag(
     history_manager = PostgresChatMessageHistory(
     DB_URL, 
     session_id,
-    table_name=TABLE_NAME
+    TABLE_NAME
     )
     history_messages = history_manager.messages
     
