@@ -1,6 +1,3 @@
-# FINAL: Force pip to ignore the conflicting packages that pull in kubernetes
---constraint 'kubernetes<0'
---constraint 'huggingface-hub<0'
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.0
 aiosignal==1.4.0
