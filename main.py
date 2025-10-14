@@ -8,12 +8,15 @@ from contextlib import asynccontextmanager
 from sqlalchemy import create_engine
 from auth import get_current_user, User
 import logging
+import redis
 import os
 import shutil
 from typing import Dict, List, Any
 from operator import itemgetter 
 
 # LangChain Components
+from langchain_community.chat_message_histories import RedisChatMessageHistory 
+from redis import Redis # Import the client
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import SentenceTransformerEmbeddings
@@ -36,6 +39,7 @@ class GroundingDecision(BaseModel):
 # --- 2. Configuration and Initialization ---
 load_dotenv()
 
+
 # --- Model Definitions (User-Facing Name -> Deep Infra ID) ---
 MODEL_MAPPING = {
     "fast-chat": "meta-llama/Meta-Llama-3-8B-Instruct",
@@ -48,10 +52,17 @@ EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
 COLLECTION_NAME = "rag_documents"
 
+
 # CRITICAL: Database connection setup (Reads PGVECTOR_CONNECTION_STRING from Render ENV)
-DB_URL = os.getenv("PGVECTOR_CONNECTION_STRING")
+DB_URL = os.getenv("PGVECTOR_CONNECTION_STRING") # KEEP for PGVector/RAG
 if not DB_URL:
     raise ValueError("DB_URL (PGVECTOR_CONNECTION_STRING) not found. Check Render ENV!")
+
+REDIS_URL = os.getenv("REDIS_URL") 
+if not REDIS_URL:
+    raise ValueError("REDIS_URL not found. Check Render ENV!")
+
+REDIS_CLIENT = Redis.from_url(REDIS_URL)
 
 # CRITICAL: Deep Infra Authentication Setup
 deepinfra_key = os.getenv("DEEPINFRA_API_KEY")
@@ -70,7 +81,7 @@ except Exception as e:
     DB_ENGINE = None
 
 vector_store = None 
-
+global EMBEDDINGS_INSTANCE
 
 # --- 3. FastAPI Lifespan Event (The Cloud Crash Fix) ---
 
@@ -83,27 +94,23 @@ async def lifespan(app: FastAPI):
 
     try:
         # NOTE: We load the embedding model once here to satisfy the vector_store requirement 
-        embeddings = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL) 
         
-        # We attempt to initialize PGVector by connecting to the existing table/collection
-        # This will fail gracefully if the table doesn't exist, which is handled in /upload_document
-        from langchain_postgres.vectorstores import PGVector
-        
+        global EMBEDDINGS_INSTANCE
+        EMBEDDINGS_INSTANCE = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL)
+        logging.info("DB Status: Embeddings model loaded successfully.")
         # We need the vector store to be defined so the /chat endpoint can use the retriever
         vector_store = PGVector(
             embeddings=embeddings,
             collection_name=COLLECTION_NAME,
             connection=DB_URL
         )
-        logging.info("DB Status: PGVector placeholder initialized successfully.")
+        
 
     except Exception as e:
-        # This catches errors like connection failure during startup, preventing a crash
-        logging.error(f"FATAL: PGVector initialization failed during startup. Indexing disabled until upload. Error: {e}")
-        vector_store = None # Ensure it is None if it failed
+        logging.error(f"FATAL: Embedding Model failed to load: {e}", exc_info=True)
+        EMBEDDINGS_INSTANCE = None 
 
-    # SERVER IS READY
-    yield 
+    yield # Application ready! (Port is open)
 
     logging.info("SHUTDOWN: Application shutting down.")
 
@@ -277,10 +284,12 @@ async def chat_with_rag(
 
     TABLE_NAME = "langchain_chat_history" 
 
-    history_manager = PostgresChatMessageHistory(
-    DB_URL, 
-    session_id,
-    TABLE_NAME
+    redis_client = Redis.from_url(REDIS_URL)
+
+    history_manager = RedisChatMessageHistory(
+    session_id=session_id, 
+    key_prefix=user_id, # Use user_id as a namespace for all of their chats
+    client=REDIS_CLIENT
     )
     history_messages = history_manager.messages
     
