@@ -1,4 +1,4 @@
-# main.py - FINAL CLOUD-READY API CODE WITH REDIS MEMORY FIX
+# main.py - FINAL PRODUCTION CODE (Redis Memory & PGVector RAG)
 
 # --- 1. Dependencies and Setup ---
 from fastapi import FastAPI, UploadFile, File, HTTPException, Security
@@ -6,13 +6,14 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv 
 from contextlib import asynccontextmanager 
 from sqlalchemy import create_engine
-from auth import get_current_user, User
+from auth import get_current_user, User # Auth0 logic (used for user_id extraction)
 import logging
 import os
 import shutil
+import json
 from typing import Dict, List, Any
 from operator import itemgetter 
-from redis import Redis
+from redis import Redis # FINAL CHAT MEMORY FIX
 from langchain_community.chat_message_histories import RedisChatMessageHistory 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -44,24 +45,24 @@ MODEL_MAPPING = {
 }
 
 # Configuration Variables
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+EMBEDDING_MODEL = "all-MiniLM-L6s-v2" # Slightly smaller model to save memory
 DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
 COLLECTION_NAME = "rag_documents"
 
-# CRITICAL: Database connection setup
-DB_URL = os.getenv("PGVECTOR_CONNECTION_STRING") # PostgreSQL for RAG
-REDIS_URL = os.getenv("REDIS_URL")               # Redis for Chat History
+# CRITICAL: Environment Variables
+DB_URL = os.getenv("PGVECTOR_CONNECTION_STRING")
+REDIS_URL = os.getenv("REDIS_URL")
 if not DB_URL or not REDIS_URL:
     raise ValueError("Missing critical DB or REDIS URL in Render ENV!")
     
-# CRITICAL: Deep Infra Authentication Setup
+# Deep Infra Authentication Setup
 deepinfra_key = os.getenv("DEEPINFRA_API_KEY")
 if not deepinfra_key:
     raise ValueError("DEEPINFRA_API_KEY not found. Check Render ENV!")
 os.environ['OPENAI_API_KEY'] = deepinfra_key 
 os.environ['OPENAI_API_BASE'] = DEEPINFRA_BASE_URL
 
-# Initialize Global Instances (Non-blocking objects for lifespan use)
+# Initialize Global Instances
 try:
     DB_ENGINE = create_engine(DB_URL.replace("+psycopg", "")) 
 except Exception as e:
@@ -70,22 +71,23 @@ except Exception as e:
 
 vector_store = None 
 global EMBEDDINGS_INSTANCE
-global REDIS_CLIENT_INSTANCE
+global REDIS_CLIENT_INSTANCE # CRITICAL: Global client for Redis memory
+
 
 # --- 3. FastAPI Lifespan Event (The Cloud Stability Fix) ---
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logging.info("STARTUP: Running memory-intensive initialization...")
+    logging.info("STARTUP: Running initialization...")
     
     global vector_store
     global EMBEDDINGS_INSTANCE
     global REDIS_CLIENT_INSTANCE
     
-    vector_store = None # Ensure placeholder is set
+    vector_store = None 
 
     try:
-        # 1. Initialize Redis Client (Simple connection, non-blocking)
+        # 1. Initialize Redis Client (Simple connection)
         REDIS_CLIENT_INSTANCE = Redis.from_url(REDIS_URL)
         REDIS_CLIENT_INSTANCE.ping()
         logging.info("DB Status: Redis client initialized successfully.")
@@ -101,9 +103,9 @@ async def lifespan(app: FastAPI):
         logging.error(f"FATAL: Embedding Model failed to load: {e}", exc_info=True)
         EMBEDDINGS_INSTANCE = None 
 
-    # NOTE: PGVector (RAG index) is *not* initialized here; it waits for /upload_document.
+    # NOTE: PGVector (RAG index) is not initialized here; it waits for /upload_document.
     
-    yield # Application ready! (Port is open)
+    yield # Application ready!
 
     logging.info("SHUTDOWN: Application shutting down.")
 
@@ -201,7 +203,6 @@ def create_vector_store(file_path: str):
     global vector_store
 
     if DB_ENGINE is None:
-        # If DB initialization failed on startup, we cannot proceed.
         raise Exception("RAG indexing cannot proceed: Database Engine initialization failed during startup.")
 
     try:
@@ -258,23 +259,26 @@ async def upload_document(file: UploadFile = File(...)):
 @app.post("/chat")
 async def chat_with_rag(
     request: ChatRequest, 
-    # current_user: User = Security(get_current_user) 
+    current_user: User = Security(get_current_user) 
 ):
     global vector_store
+    global REDIS_CLIENT_INSTANCE
 
+    # User ID is hardcoded for this final test (MUST BE REMOVED FOR FINAL UI)
     user_id = "SUPABASE_REDIS_TESTER"
-
-    # 1. Initialization and History Retrieval (FIXED: Uses Redis)
+    
+    # 1. Initialization and History Retrieval (Uses Redis)
     session_id = f"{user_id}_{request.conversation_id}"
 
-    # Use the corrected, keyword-free Redis history manager call
+    # Check for Redis client availability
     if REDIS_CLIENT_INSTANCE is None:
          raise HTTPException(status_code=500, detail="Chat history unavailable. Redis connection failed on startup.")
 
+    # Use the corrected, keyword-free Redis history manager call
     history_manager = RedisChatMessageHistory(
         session_id=session_id, 
         key_prefix=user_id,
-        redis_client=REDIS_CLIENT_INSTANCE # Uses the global client
+        client=REDIS_CLIENT_INSTANCE 
     )
     
     history_messages = history_manager.messages
@@ -336,20 +340,20 @@ async def chat_with_rag(
         raise HTTPException(status_code=500, detail=f"LLM Inference Error: {e}")
 
 
-# --- 7. Utility Endpoints ---
+# --- 7. Utility Endpoints (Cleanup & History Retrieval) ---
 
 @app.get("/get_conversations")
 def get_conversations(current_user: User = Security(get_current_user)):
     """
     Returns a list of all saved conversation IDs for the logged-in user.
-    NOTE: This is a placeholder for the MVP, as scanning the DB is complex.
+    NOTE: This is a placeholder for the MVP.
     """
     user_id = current_user.user_id
     
     return {
         "user_id": user_id,
-        "warning": "Conversation history listing is complex and requires a direct DB query.",
-        "suggestion": f"Log into your Supabase Dashboard and check the 'langchain_chat_history' table for sessions starting with: {user_id}_",
+        "warning": "Conversation history listing requires scanning Redis, which is complex for an MVP.",
+        "suggestion": "Proceed with building the Streamlit UI to manage sessions via the URL.",
     }
 
 
@@ -359,11 +363,20 @@ def get_history(
     current_user: User = Security(get_current_user)
 ):
     """Debug endpoint to view the persistent Redis chat history."""
+    global REDIS_CLIENT_INSTANCE
+
     user_id = current_user.user_id
     session_id = f"{user_id}_{conversation_id}"
     
+    if REDIS_CLIENT_INSTANCE is None:
+         raise HTTPException(status_code=500, detail="History unavailable. Redis connection failed.")
+         
     # CRITICAL: We initialize a *new* history manager for read access
-    history_manager = RedisChatMessageHistory(session_id=session_id, key_prefix=user_id, client=REDIS_CLIENT_INSTANCE)
+    history_manager = RedisChatMessageHistory(
+        session_id=session_id, 
+        key_prefix=user_id,
+        client=REDIS_CLIENT_INSTANCE
+    )
     
     messages_list = [{"type": msg.type, "content": msg.content} for msg in history_manager.messages]
     
