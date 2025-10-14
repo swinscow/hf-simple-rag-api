@@ -45,7 +45,7 @@ MODEL_MAPPING = {
 }
 
 # Configuration Variables
-EMBEDDING_MODEL = "all-MiniLM-L6s-v2"
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
 COLLECTION_NAME = "rag_documents"
 
@@ -274,7 +274,7 @@ async def chat_with_rag(
     history_manager = RedisChatMessageHistory(
         session_id=session_id, 
         key_prefix=user_id,
-        client=REDIS_CLIENT_INSTANCE 
+        redis_client=REDIS_CLIENT_INSTANCE 
     )
     
     history_messages = history_manager.messages
