@@ -274,7 +274,11 @@ async def chat_with_rag(
 
     # 1. Initialization and History Retrieval
     session_id = f"{user_id}_{request.conversation_id}"
-    history_manager = PostgresChatMessageHistory(DB_URL, session_id)
+    history_manager = PostgresChatMessageHistory(
+    connection_string=DB_URL, 
+    session_id=session_id,
+    table_name="langchain_chat_history" # CRITICAL: Explicitly specify table name
+    )
     history_messages = history_manager.messages
     
     history_string = "\n".join([f"{msg.type.capitalize()}: {msg.content}" for msg in history_messages])
