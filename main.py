@@ -1,4 +1,4 @@
-# main.py - FINAL PRODUCTION-READY API CODE (Cloud/Supabase/Auth0)
+# main.py - FINAL CLOUD-READY API CODE WITH REDIS MEMORY FIX
 
 # --- 1. Dependencies and Setup ---
 from fastapi import FastAPI, UploadFile, File, HTTPException, Security
@@ -8,15 +8,12 @@ from contextlib import asynccontextmanager
 from sqlalchemy import create_engine
 from auth import get_current_user, User
 import logging
-import redis
 import os
 import shutil
 from typing import Dict, List, Any
 from operator import itemgetter 
-
-# LangChain Components
+from redis import Redis
 from langchain_community.chat_message_histories import RedisChatMessageHistory 
-from redis import Redis # Import the client
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import SentenceTransformerEmbeddings
@@ -25,7 +22,7 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_postgres import PGVector, PostgresChatMessageHistory 
+from langchain_postgres import PGVector # Retained for RAG indexing only
 
 
 # --- Pydantic Model for Intent Classification ---
@@ -39,8 +36,7 @@ class GroundingDecision(BaseModel):
 # --- 2. Configuration and Initialization ---
 load_dotenv()
 
-
-# --- Model Definitions (User-Facing Name -> Deep Infra ID) ---
+# --- Model Definitions ---
 MODEL_MAPPING = {
     "fast-chat": "meta-llama/Meta-Llama-3-8B-Instruct",
     "smart-chat": "meta-llama/Meta-Llama-3-70B-Instruct",
@@ -52,70 +48,67 @@ EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
 COLLECTION_NAME = "rag_documents"
 
-
-# CRITICAL: Database connection setup (Reads PGVECTOR_CONNECTION_STRING from Render ENV)
-DB_URL = os.getenv("PGVECTOR_CONNECTION_STRING") # KEEP for PGVector/RAG
-if not DB_URL:
-    raise ValueError("DB_URL (PGVECTOR_CONNECTION_STRING) not found. Check Render ENV!")
-
-REDIS_URL = os.getenv("REDIS_URL") 
-if not REDIS_URL:
-    raise ValueError("REDIS_URL not found. Check Render ENV!")
-
-REDIS_CLIENT = Redis.from_url(REDIS_URL)
-
+# CRITICAL: Database connection setup
+DB_URL = os.getenv("PGVECTOR_CONNECTION_STRING") # PostgreSQL for RAG
+REDIS_URL = os.getenv("REDIS_URL")               # Redis for Chat History
+if not DB_URL or not REDIS_URL:
+    raise ValueError("Missing critical DB or REDIS URL in Render ENV!")
+    
 # CRITICAL: Deep Infra Authentication Setup
 deepinfra_key = os.getenv("DEEPINFRA_API_KEY")
 if not deepinfra_key:
     raise ValueError("DEEPINFRA_API_KEY not found. Check Render ENV!")
-
-# Set environment variables for LangChain compatibility
 os.environ['OPENAI_API_KEY'] = deepinfra_key 
 os.environ['OPENAI_API_BASE'] = DEEPINFRA_BASE_URL
 
-# Initialize DB connection pool engine (non-blocking)
+# Initialize Global Instances (Non-blocking objects for lifespan use)
 try:
     DB_ENGINE = create_engine(DB_URL.replace("+psycopg", "")) 
 except Exception as e:
-    logging.critical(f"FATAL: Database Engine creation failed: {e}")
+    logging.critical(f"FATAL: Database Engine creation failed: {e}", exc_info=True)
     DB_ENGINE = None
 
 vector_store = None 
 global EMBEDDINGS_INSTANCE
+global REDIS_CLIENT_INSTANCE
 
-# --- 3. FastAPI Lifespan Event (The Cloud Crash Fix) ---
+# --- 3. FastAPI Lifespan Event (The Cloud Stability Fix) ---
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logging.info("STARTUP: Application starting...")
+    logging.info("STARTUP: Running memory-intensive initialization...")
     
     global vector_store
-    vector_store = None # Ensure global placeholder is set
+    global EMBEDDINGS_INSTANCE
+    global REDIS_CLIENT_INSTANCE
+    
+    vector_store = None # Ensure placeholder is set
 
     try:
-        # NOTE: We load the embedding model once here to satisfy the vector_store requirement 
+        # 1. Initialize Redis Client (Simple connection, non-blocking)
+        REDIS_CLIENT_INSTANCE = Redis.from_url(REDIS_URL)
+        REDIS_CLIENT_INSTANCE.ping()
+        logging.info("DB Status: Redis client initialized successfully.")
+    except Exception as e:
+        logging.error(f"FATAL: Redis client connection failed: {e}", exc_info=True)
+        REDIS_CLIENT_INSTANCE = None
         
-        global EMBEDDINGS_INSTANCE
+    try:
+        # 2. Load the memory-intensive embedding model (OOM fix)
         EMBEDDINGS_INSTANCE = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL)
         logging.info("DB Status: Embeddings model loaded successfully.")
-        # We need the vector store to be defined so the /chat endpoint can use the retriever
-        vector_store = PGVector(
-            embeddings=embeddings,
-            collection_name=COLLECTION_NAME,
-            connection=DB_URL
-        )
-        
-
     except Exception as e:
         logging.error(f"FATAL: Embedding Model failed to load: {e}", exc_info=True)
         EMBEDDINGS_INSTANCE = None 
 
+    # NOTE: PGVector (RAG index) is *not* initialized here; it waits for /upload_document.
+    
     yield # Application ready! (Port is open)
 
     logging.info("SHUTDOWN: Application shutting down.")
 
 
-app = FastAPI(lifespan=lifespan) # <--- FINAL APP DECLARATION (MUST BE UNINDENTED)
+app = FastAPI(lifespan=lifespan) # <--- FINAL APP DECLARATION
 
 # --- New Simple Health Check Endpoint ---
 @app.get("/", include_in_schema=False)
@@ -125,7 +118,6 @@ def health_check():
 
 
 # --- 4. Prompt Definitions ---
-# (Prompts for STRICT, FLEXIBLE, and PURE chat modes)
 STRICT_RAG_PROMPT = """
 You are an expert Q&A assistant. Your ONLY source of truth is the provided CONTEXT. 
 Answer the user's question ONLY based on the CONTEXT. 
@@ -208,42 +200,39 @@ def create_vector_store(file_path: str):
     """Loads, chunks, embeds, and indexes the document into the PGVector database."""
     global vector_store
 
-    if vector_store is not None:
-        # CRITICAL: This is the first time the PGVector store is created.
-        # This will create the tables in Supabase.
-        logging.info("Re-initializing PGVector store for new indexing.")
-        try:
-            embeddings = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL)
+    if DB_ENGINE is None:
+        # If DB initialization failed on startup, we cannot proceed.
+        raise Exception("RAG indexing cannot proceed: Database Engine initialization failed during startup.")
 
-            # 1. Load and split documents
-            loader = PyPDFLoader(file_path)
-            documents = loader.load()
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-            splits = text_splitter.split_documents(documents)
+    try:
+        # Load and split documents
+        loader = PyPDFLoader(file_path)
+        documents = loader.load()
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        splits = text_splitter.split_documents(documents)
 
-            # 2. Use the stable .from_documents method (Handles table creation/connection)
-            vector_store = PGVector.from_documents(
-                documents=splits, 
-                embedding=embeddings, 
-                collection_name=COLLECTION_NAME,
-                connection=DB_URL
-            )
-            logging.info("RAG Indexing SUCCESS: Documents added to PGVector.")
-            return True
-        except Exception as e:
-            logging.error(f"RAG creation failed during runtime: {e}", exc_info=True)
-            return False
-    else:
-        # This path should ideally not be hit after the lifespan event is run, but serves as a safety check
-        raise Exception("RAG indexing cannot proceed: Vector store was not initialized during startup.")
-
+        # CRITICAL: Use the global embedding instance loaded in the lifespan
+        embeddings = EMBEDDINGS_INSTANCE 
+        
+        # Use the stable .from_documents method (Handles table creation/connection)
+        vector_store = PGVector.from_documents(
+            documents=splits, 
+            embedding=embeddings, 
+            collection_name=COLLECTION_NAME,
+            connection=DB_URL # Use the URL string for PGVector.from_documents
+        )
+        
+        return True
+    except Exception as e:
+        logging.error(f"RAG creation failed during runtime: {e}", exc_info=True)
+        return False
 
 def format_docs(docs):
     """Converts a list of documents into a single string for the prompt context."""
     return "\n\n".join(doc.page_content for doc in docs)
 
 
-# --- 7. FastAPI Endpoints ---
+# --- 6. FastAPI Endpoints ---
 
 class ChatRequest(BaseModel):
     conversation_id: str = "new_chat"
@@ -260,48 +249,45 @@ async def upload_document(file: UploadFile = File(...)):
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     
-    # CRITICAL: The create_vector_store function must run successfully here
     if create_vector_store(file_path):
         return {"message": f"Document '{file.filename}' uploaded and indexed successfully! Use the /chat endpoint now."}
     else:
-        # RAG creation failed during runtime. Return a 500 error.
         raise HTTPException(status_code=500, detail="Failed to create RAG index.")
 
 
 @app.post("/chat")
 async def chat_with_rag(
     request: ChatRequest, 
-   #  current_user: User = Security(get_current_user) 
+    current_user: User = Security(get_current_user) 
 ):
     global vector_store
+    global REDIS_CLIENT_INSTANCE # CRITICAL: Access the global client
 
-    user_id = "SUPABASE_RAG_TESTER"
-    
-    # user_id = current_user.user_id 
+    # User ID is securely retrieved from the token:
+    user_id = current_user.user_id 
 
-    # 1. Initialization and History Retrieval
+    # 1. Initialization and History Retrieval (FIXED: Uses Redis)
     session_id = f"{user_id}_{request.conversation_id}"
 
-    TABLE_NAME = "langchain_chat_history" 
-
-    redis_client = Redis.from_url(REDIS_URL)
+    # Use the corrected, keyword-free Redis history manager call
+    if REDIS_CLIENT_INSTANCE is None:
+         raise HTTPException(status_code=500, detail="Chat history unavailable. Redis connection failed on startup.")
 
     history_manager = RedisChatMessageHistory(
-    session_id=session_id, 
-    key_prefix=user_id, # Use user_id as a namespace for all of their chats
-    client=REDIS_CLIENT
+        session_id=session_id, 
+        key_prefix=user_id,
+        client=REDIS_CLIENT_INSTANCE # Uses the global client
     )
+    
     history_messages = history_manager.messages
     
     history_string = "\n".join([f"{msg.type.capitalize()}: {msg.content}" for msg in history_messages])
     llm_instance = get_llm_for_user(request.model_key)
     
-    # 2. Logic Branching
+    # 2. Logic Branching (RAG / PURE CHAT)
     if vector_store is not None:
         # --- RAG MODE (Document Available) ---
-        
         is_strict = check_for_general_intent(request.message, llm_instance)
-        
         selected_prompt = strict_prompt if is_strict else flexible_prompt
         mode = "STRICT_RAG" if is_strict else "FLEXIBLE_RAG"
         
@@ -374,11 +360,12 @@ def get_history(
     conversation_id: str, 
     current_user: User = Security(get_current_user)
 ):
-    """Debug endpoint to view the persistent PostgreSQL chat history."""
+    """Debug endpoint to view the persistent Redis chat history."""
     user_id = current_user.user_id
     session_id = f"{user_id}_{conversation_id}"
     
-    history_manager = PostgresChatMessageHistory(connection_string=DB_URL, session_id=session_id)
+    # CRITICAL: We initialize a *new* history manager for read access
+    history_manager = RedisChatMessageHistory(session_id=session_id, key_prefix=user_id, client=REDIS_CLIENT_INSTANCE)
     
     messages_list = [{"type": msg.type, "content": msg.content} for msg in history_manager.messages]
     
