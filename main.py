@@ -278,8 +278,8 @@ async def chat_with_rag(
     TABLE_NAME = "langchain_chat_history" 
 
     history_manager = PostgresChatMessageHistory(
-    connection_string=DB_URL, 
-    session_id=session_id,
+    DB_URL, 
+    session_id,
     table_name=TABLE_NAME
     )
     history_messages = history_manager.messages
