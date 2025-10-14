@@ -14,7 +14,7 @@ import json
 from typing import Dict, List, Any
 from operator import itemgetter 
 from redis import Redis 
-from langchain_community.chat_message_histories import RedisChatMessageHistory 
+# from langchain_community.chat_message_histories import RedisChatMessageHistory 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import SentenceTransformerEmbeddings
@@ -252,34 +252,36 @@ async def upload_document(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail="Failed to create RAG index.")
 
 
+# main.py - FINAL AND CORRECT CHAT ENDPOINT WITH PURE REDIS MEMORY
+
 @app.post("/chat")
 async def chat_with_rag(
     request: ChatRequest, 
-    #current_user: User = Security(get_current_user) 
+    current_user: User = Security(get_current_user) 
 ):
     global vector_store
     global REDIS_CLIENT_INSTANCE
 
-    # User ID is hardcoded for this final test (MUST BE REMOVED FOR FINAL UI)
+    # --- SECURITY BYPASS: Set user_id for testing (MUST BE REMOVED LATER) ---
     user_id = "SUPABASE_REDIS_TESTER"
     
-    # 1. Initialization and History Retrieval (Uses Redis)
+    # 1. Initialization and Retrieval
     session_id = f"{user_id}_{request.conversation_id}"
 
-    # Check for Redis client availability
+    # Check for Redis client availability (Fatal if not connected)
     if REDIS_CLIENT_INSTANCE is None:
          raise HTTPException(status_code=500, detail="Chat history unavailable. Redis connection failed on startup.")
 
-    # Use the corrected, keyword-free Redis history manager call
-    history_manager = RedisChatMessageHistory(
-        session_id=session_id, 
-        key_prefix=user_id,
-        redis_client=REDIS_CLIENT_INSTANCE 
-    )
+    # Define the key used to store this conversation in Redis
+    history_key = f"chat:{user_id}:{request.conversation_id}"
+
+    # Retrieve history directly from Redis (avoids crashing wrapper)
+    history_raw = REDIS_CLIENT_INSTANCE.lrange(history_key, 0, -1)
     
-    history_messages = history_manager.messages
-    
-    history_string = "\n".join([f"{msg.type.capitalize()}: {msg.content}" for msg in history_messages])
+    # Deserialize the history into a usable string format
+    history_messages = [json.loads(msg.decode('utf-8')) for msg in history_raw]
+    history_string = "\n".join([f"{msg['type'].capitalize()}: {msg['content']}" for msg in history_messages])
+
     llm_instance = get_llm_for_user(request.model_key)
     
     # 2. Logic Branching (RAG / PURE CHAT)
@@ -325,16 +327,21 @@ async def chat_with_rag(
         
         response_text = chat_chain.invoke(input_dict)
         
-        # Update the history store with the new messages
-        history_manager.add_user_message(request.message)
-        history_manager.add_ai_message(response_text)
+        # --- CRITICAL: Save the new messages directly to Redis (STABLE LOGIC) ---
+        history_to_save = [
+            {"type": "human", "content": request.message},
+            {"type": "ai", "content": response_text}
+        ]
+        for message in history_to_save:
+            # RPUSH adds the message to the end of the list key
+            REDIS_CLIENT_INSTANCE.rpush(history_key, json.dumps(message))
+        # ----------------------------------------------------------------------
         
         return {"response": response_text, "model_used": llm_instance.model_name, "conversation_id": request.conversation_id, "mode": mode}
         
     except Exception as e:
         logging.error(f"LLM Inference Detail Error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"LLM Inference Error: {e}")
-
 
 # --- 7. Utility Endpoints (Cleanup & History Retrieval) ---
 
