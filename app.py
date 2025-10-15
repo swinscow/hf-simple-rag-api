@@ -1,4 +1,4 @@
-# app.py - Streamlit Frontend with Supabase Login
+# app.py - Streamlit Frontend with Document Upload
 
 import streamlit as st
 import requests
@@ -23,7 +23,7 @@ except Exception as e:
 
 
 st.set_page_config(layout="wide")
-st.title("Welcome to pueblo ai (MVP)")
+st.title("🧠 Open-Source LLM Platform (MVP)")
 
 # --- Session State Management ---
 if 'auth_token' not in st.session_state:
@@ -60,6 +60,53 @@ def show_login_form():
                 except Exception as e:
                     st.error(f"Sign up failed: {e}")
 
+# --- API Call Functions ---
+def upload_and_index_document(file_to_upload):
+    """Sends the uploaded file to the backend's /upload_document endpoint."""
+    with st.spinner("Uploading and indexing document... this may take a moment."):
+        headers = {
+            "Authorization": f"Bearer {st.session_state.auth_token}"
+        }
+        # The 'requests' library expects files in a specific format
+        files = {"file": (file_to_upload.name, file_to_upload, "application/pdf")}
+        
+        try:
+            # NOTE: We are not sending JSON, so we use the 'files' parameter
+            response = requests.post(f"{API_BASE_URL}/upload_document", headers=headers, files=files)
+            
+            if response.status_code == 401:
+                st.error("Authentication failed. Please log out and log back in.")
+                return
+            
+            response.raise_for_status()
+            st.success(response.json().get("message", "Document indexed successfully! You can now ask questions about it."))
+        except requests.exceptions.RequestException as e:
+            st.error(f"Failed to upload document: {e}")
+
+def call_api_and_get_response(prompt_text):
+    """Sends the user prompt to the live FastAPI backend."""
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {st.session_state.auth_token}"
+    }
+    payload = {
+        "conversation_id": st.session_state.conversation_id,
+        "model_key": st.session_state.model_key,
+        "message": prompt_text,
+    }
+    try:
+        response = requests.post(f"{API_BASE_URL}/chat", headers=headers, data=json.dumps(payload))
+        if response.status_code == 401:
+                st.error("Authentication failed. Your session may have expired. Please log out and log back in.")
+                return "Authentication Error", "ERROR"
+        response.raise_for_status()
+        data = response.json()
+        return data.get("response", "Error: No text in response."), data.get("mode", "UNKNOWN")
+    except requests.exceptions.RequestException as e:
+        st.error(f"API Error: {e}")
+        return "Server connection failed.", "ERROR"
+
+
 # --- Main App Logic ---
 if not st.session_state.auth_token:
     show_login_form()
@@ -82,29 +129,20 @@ else:
             st.session_state.auth_token = None
             st.session_state.user_id = None
             st.rerun()
+        
+        # --- NEW: RAG Document Upload Section ---
+        st.markdown("---")
+        st.subheader("RAG Indexing")
+        
+        uploaded_file = st.file_uploader(
+            "Upload a PDF to chat with", 
+            type="pdf"
+        )
 
-    # --- API Call Function ---
-    def call_api_and_get_response(prompt_text):
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {st.session_state.auth_token}" # <-- SEND THE TOKEN
-        }
-        payload = {
-            "conversation_id": st.session_state.conversation_id,
-            "model_key": st.session_state.model_key,
-            "message": prompt_text,
-        }
-        try:
-            response = requests.post(f"{API_BASE_URL}/chat", headers=headers, data=json.dumps(payload))
-            if response.status_code == 401:
-                 st.error("Authentication failed. Your session may have expired. Please log out and log back in.")
-                 return "Authentication Error", "ERROR"
-            response.raise_for_status()
-            data = response.json()
-            return data.get("response", "Error: No text in response."), data.get("mode", "UNKNOWN")
-        except requests.exceptions.RequestException as e:
-            st.error(f"API Error: {e}")
-            return "Server connection failed.", "ERROR"
+        if uploaded_file is not None:
+            if st.button("Index Document", use_container_width=True):
+                upload_and_index_document(uploaded_file)
+        # --- End of New Section ---
 
     # --- Chat Interface ---
     for message in st.session_state.messages:
