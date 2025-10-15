@@ -182,7 +182,7 @@ async def chat_with_rag(request: ChatRequest, current_user: User = Security(get_
         # --- THIS IS THE FIX ---
         # The parameter name is 'embedding', not 'embedding_function'
         vector_store = PGVector(
-            embedding=EMBEDDINGS_INSTANCE,
+            embedding_function=EMBEDDINGS_INSTANCE,
             collection_name=collection_name_str,
             connection=DB_URL
         )
