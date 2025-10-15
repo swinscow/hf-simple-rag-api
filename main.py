@@ -1,4 +1,4 @@
-# main.py - FINAL PRODUCTION CODE (Corrected Multi-User RAG Logic)
+# main.py - FINAL PRODUCTION CODE (Corrected PGVector Initialization)
 
 # --- 1. Dependencies and Setup ---
 from fastapi import FastAPI, UploadFile, File, HTTPException, Security
@@ -178,11 +178,16 @@ async def chat_with_rag(request: ChatRequest, current_user: User = Security(get_
     if active_collection_name:
         collection_name_str = active_collection_name.decode('utf-8')
         logging.info(f"User {user_id} using RAG with collection: {collection_name_str}")
+        
+        # --- THIS IS THE FIX ---
+        # The parameter name is 'embedding', not 'embedding_function'
         vector_store = PGVector(
             embedding_function=EMBEDDINGS_INSTANCE,
             collection_name=collection_name_str,
             connection=DB_URL
         )
+        # ----------------------
+
         retriever = vector_store.as_retriever(search_kwargs={"k": 3})
         
         mode = "FLEXIBLE_RAG" 
