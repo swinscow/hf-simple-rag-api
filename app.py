@@ -1,4 +1,4 @@
-# app.py - Streamlit Frontend with Document Upload
+# app.py - Streamlit Frontend with Conversation History
 
 import streamlit as st
 import requests
@@ -7,12 +7,11 @@ import uuid
 from supabase import create_client, Client
 
 # --- CONFIGURATION ---
-API_BASE_URL = "https://fastapi-backend-tq2s.onrender.com/"  # <-- MAKE SURE THIS IS YOUR CORRECT BACKEND URL
+API_BASE_URL = "https://your-fastapi-backend-url.onrender.com"  # <-- MAKE SURE THIS IS YOUR CORRECT BACKEND URL
 
-# Use Streamlit secrets for Supabase credentials in a real app
-# For now, we'll place them here.
-SUPABASE_URL = "https://nleucprtizqqofaitqcu.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5sZXVjcHJ0aXpxcW9mYWl0cWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjAwNDc3OTcsImV4cCI6MjA3NTYyMzc5N30.3y7GSxNsIcXGSVtcFmdkoR0W12jCOGAYYhkjk6HV4qg" # IMPORTANT: Use the ANON key, not the service key
+# Use Streamlit secrets for Supabase credentials
+SUPABASE_URL = "YOUR_SUPABASE_URL"
+SUPABASE_KEY = "YOUR_SUPABASE_ANON_KEY"
 
 # --- INITIALIZE SUPABASE CLIENT ---
 try:
@@ -37,11 +36,11 @@ if 'messages' not in st.session_state:
 
 # --- Authentication Logic ---
 def show_login_form():
+    # ... (omitted for brevity)
     st.header("Login / Sign Up")
     with st.form("login_form"):
         email = st.text_input("Email")
         password = st.text_input("Password", type="password")
-        
         col1, col2 = st.columns(2)
         with col1:
             if st.form_submit_button("Login", use_container_width=True):
@@ -60,35 +59,26 @@ def show_login_form():
                 except Exception as e:
                     st.error(f"Sign up failed: {e}")
 
+
 # --- API Call Functions ---
+def get_auth_headers():
+    """Returns the authorization headers for API requests."""
+    return {"Authorization": f"Bearer {st.session_state.auth_token}"}
+
 def upload_and_index_document(file_to_upload):
-    """Sends the uploaded file to the backend's /upload_document endpoint."""
-    with st.spinner("Uploading and indexing document... this may take a moment."):
-        headers = {
-            "Authorization": f"Bearer {st.session_state.auth_token}"
-        }
-        # The 'requests' library expects files in a specific format
+    """Sends the uploaded file to the backend."""
+    with st.spinner("Uploading and indexing document..."):
         files = {"file": (file_to_upload.name, file_to_upload, "application/pdf")}
-        
         try:
-            # NOTE: We are not sending JSON, so we use the 'files' parameter
-            response = requests.post(f"{API_BASE_URL}/upload_document", headers=headers, files=files)
-            
-            if response.status_code == 401:
-                st.error("Authentication failed. Please log out and log back in.")
-                return
-            
+            response = requests.post(f"{API_BASE_URL}/upload_document", headers=get_auth_headers(), files=files)
             response.raise_for_status()
-            st.success(response.json().get("message", "Document indexed successfully! You can now ask questions about it."))
+            st.success(response.json().get("message", "Document indexed successfully!"))
         except requests.exceptions.RequestException as e:
             st.error(f"Failed to upload document: {e}")
 
 def call_api_and_get_response(prompt_text):
-    """Sends the user prompt to the live FastAPI backend."""
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {st.session_state.auth_token}"
-    }
+    """Sends the user prompt to the chat backend."""
+    headers = {"Content-Type": "application/json", **get_auth_headers()}
     payload = {
         "conversation_id": st.session_state.conversation_id,
         "model_key": st.session_state.model_key,
@@ -96,9 +86,6 @@ def call_api_and_get_response(prompt_text):
     }
     try:
         response = requests.post(f"{API_BASE_URL}/chat", headers=headers, data=json.dumps(payload))
-        if response.status_code == 401:
-                st.error("Authentication failed. Your session may have expired. Please log out and log back in.")
-                return "Authentication Error", "ERROR"
         response.raise_for_status()
         data = response.json()
         return data.get("response", "Error: No text in response."), data.get("mode", "UNKNOWN")
@@ -106,43 +93,80 @@ def call_api_and_get_response(prompt_text):
         st.error(f"API Error: {e}")
         return "Server connection failed.", "ERROR"
 
+# --- NEW: API functions for conversation history ---
+def get_all_conversations():
+    """Fetches the list of conversation IDs from the backend."""
+    try:
+        response = requests.get(f"{API_BASE_URL}/get_conversations", headers=get_auth_headers())
+        response.raise_for_status()
+        return response.json().get("conversation_ids", [])
+    except requests.exceptions.RequestException as e:
+        st.sidebar.error("Could not load history.")
+        return []
+
+def load_conversation_history(conversation_id):
+    """Fetches the messages for a specific conversation."""
+    try:
+        response = requests.get(f"{API_BASE_URL}/history/{conversation_id}", headers=get_auth_headers())
+        response.raise_for_status()
+        history = response.json().get("history", [])
+        
+        # Convert backend message format to frontend format
+        st.session_state.messages = []
+        for msg in history:
+            role = "user" if msg.get("type") == "human" else "assistant"
+            st.session_state.messages.append({"role": role, "content": msg.get("content")})
+
+        st.session_state.conversation_id = conversation_id
+        st.rerun()
+
+    except requests.exceptions.RequestException as e:
+        st.error(f"Failed to load conversation: {e}")
+
 
 # --- Main App Logic ---
 if not st.session_state.auth_token:
     show_login_form()
 else:
-    # --- Sidebar: Model and Session Management ---
-    MODEL_KEYS = ["fast-chat", "smart-chat", "coding-expert"]
+    # --- Sidebar ---
     with st.sidebar:
         st.header("Settings")
-        selected_model_key = st.selectbox("Select Model", options=MODEL_KEYS)
+        selected_model_key = st.selectbox("Select Model", options=["fast-chat", "smart-chat", "coding-expert"])
         st.session_state.model_key = selected_model_key
         st.markdown("---")
+
         if st.button("➕ Start New Chat", use_container_width=True):
             st.session_state.conversation_id = str(uuid.uuid4())
             st.session_state.messages = []
             st.rerun()
+
         st.caption(f"Session: {st.session_state.conversation_id[:8]}...")
-        st.caption(f"User: {st.session_state.user_id[:8]}...")
+        st.markdown("---")
+        
+        # --- NEW: Conversation History Section ---
+        st.subheader("Chat History")
+        conversations = get_all_conversations()
+        if not conversations:
+            st.caption("No past conversations found.")
+        else:
+            for conv_id in conversations:
+                # Use a more descriptive button label, but the key is the ID
+                if st.button(f"Chat: {conv_id[:8]}...", key=conv_id, use_container_width=True):
+                    load_conversation_history(conv_id)
+        # --- End of New Section ---
+
+        st.markdown("---")
+        st.subheader("RAG Indexing")
+        uploaded_file = st.file_uploader("Upload a PDF to chat with", type="pdf")
+        if uploaded_file:
+            if st.button("Index Document", use_container_width=True):
+                upload_and_index_document(uploaded_file)
+        
         st.markdown("---")
         if st.button("Logout", use_container_width=True):
             st.session_state.auth_token = None
             st.session_state.user_id = None
             st.rerun()
-        
-        # --- NEW: RAG Document Upload Section ---
-        st.markdown("---")
-        st.subheader("RAG Indexing")
-        
-        uploaded_file = st.file_uploader(
-            "Upload a PDF to chat with", 
-            type="pdf"
-        )
-
-        if uploaded_file is not None:
-            if st.button("Index Document", use_container_width=True):
-                upload_and_index_document(uploaded_file)
-        # --- End of New Section ---
 
     # --- Chat Interface ---
     for message in st.session_state.messages:
