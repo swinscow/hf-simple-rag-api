@@ -49,7 +49,7 @@ def show_login_form():
                     auth_response = supabase.auth.sign_in_with_password({"email": email, "password": password})
                     st.session_state.auth_token = auth_response.session.access_token
                     st.session_state.user_id = auth_response.user.id
-                    st.experimental_rerun()
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Login failed: {e}")
         with col2:
@@ -74,14 +74,14 @@ else:
         if st.button("➕ Start New Chat", use_container_width=True):
             st.session_state.conversation_id = str(uuid.uuid4())
             st.session_state.messages = []
-            st.experimental_rerun()
+            st.rerun()
         st.caption(f"Session: {st.session_state.conversation_id[:8]}...")
         st.caption(f"User: {st.session_state.user_id[:8]}...")
         st.markdown("---")
         if st.button("Logout", use_container_width=True):
             st.session_state.auth_token = None
             st.session_state.user_id = None
-            st.experimental_rerun()
+            st.rerun()
 
     # --- API Call Function ---
     def call_api_and_get_response(prompt_text):
