@@ -14,7 +14,7 @@ import json
 from typing import Dict, List, Any
 from operator import itemgetter 
 from redis import Redis 
-import hashlib # NEW: For creating unique document IDs
+import hashlib 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import SentenceTransformerEmbeddings
@@ -25,22 +25,37 @@ from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_postgres import PGVector 
 
-# --- Pydantic Models (omitted for brevity) ---
+# --- Pydantic Models ---
 class GroundingDecision(BaseModel):
-    is_general_knowledge: bool = Field(...)
+    is_general_knowledge: bool = Field(
+        ..., 
+        description="True if the user is asking a question that requires external, non-document knowledge, OR if the user explicitly tells the model to use its general knowledge. False if the user asks to stick strictly to the document."
+    )
 
-# --- 2. Configuration and Initialization (omitted for brevity) ---
+# --- 2. Configuration and Initialization ---
 load_dotenv()
-MODEL_MAPPING = {"fast-chat": "...", "smart-chat": "...", "coding-expert": "..."}
+MODEL_MAPPING = {
+    "fast-chat": "meta-llama/Meta-Llama-3-8B-Instruct",
+    "smart-chat": "meta-llama/Meta-Llama-3-70B-Instruct",
+    "coding-expert": "codellama/CodeLlama-34b-Instruct-hf"
+}
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
 DB_URL = os.getenv("PGVECTOR_CONNECTION_STRING")
 REDIS_URL = os.getenv("REDIS_URL")
-# ... (DeepInfra setup) ...
+deepinfra_key = os.getenv("DEEPINFRA_API_KEY")
+os.environ['OPENAI_API_KEY'] = deepinfra_key 
+os.environ['OPENAI_API_BASE'] = DEEPINFRA_BASE_URL
 
 global EMBEDDINGS_INSTANCE
 global REDIS_CLIENT_INSTANCE
-# ... (Redis client initialization) ...
+
+try:
+    REDIS_CLIENT_INSTANCE = Redis.from_url(REDIS_URL)
+    REDIS_CLIENT_INSTANCE.ping()
+except Exception as e:
+    logging.error(f"FATAL: Redis client connection failed during global init: {e}", exc_info=True)
+    REDIS_CLIENT_INSTANCE = None
 
 # --- 3. FastAPI Lifespan Event ---
 @asynccontextmanager
@@ -58,34 +73,62 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# --- Health Check, Prompts, and Helper Functions (omitted for brevity) ---
+# --- Health Check, Prompts, and Helper Functions ---
 @app.get("/", include_in_schema=False)
 def health_check(): return {"status": "ok"}
-STRICT_RAG_PROMPT = """..."""
-strict_prompt = ChatPromptTemplate.from_template(STRICT_RAG_PROMPT)
-# ... (other prompts and helpers) ...
-def get_llm_for_user(model_key: str): #...
-    return ChatDeepInfra(...)
-# ...
 
-# --- MODIFIED: RAG Helper Functions ---
+STRICT_RAG_PROMPT = """You are an expert Q&A assistant. Your ONLY source of truth is the provided CONTEXT. Answer the user's question ONLY based on the CONTEXT. If the CONTEXT does not contain the answer, state explicitly that the information is unavailable in the documents.
+
+CONTEXT:
+{context}
+
+CHAT HISTORY:
+{chat_history}
+
+QUESTION:
+{question}
+"""
+strict_prompt = ChatPromptTemplate.from_template(STRICT_RAG_PROMPT)
+FLEXIBLE_RAG_PROMPT = """You are a helpful assistant. Use the provided CONTEXT first to answer the question. If the CONTEXT is insufficient or empty, use your general knowledge to provide a comprehensive answer.
+
+CONTEXT:
+{context}
+
+CHAT HISTORY:
+{chat_history}
+
+QUESTION:
+{question}
+"""
+flexible_prompt = ChatPromptTemplate.from_template(FLEXIBLE_RAG_PROMPT)
+PURE_CHAT_PROMPT = """You are a friendly and helpful general knowledge assistant. Use your knowledge to answer the user's question and maintain the conversation flow.
+
+CHAT HISTORY:
+{chat_history}
+
+QUESTION:
+{question}
+"""
+pure_prompt = ChatPromptTemplate.from_template(PURE_CHAT_PROMPT)
+
+def get_llm_for_user(model_key: str):
+    model_id = MODEL_MAPPING.get(model_key, MODEL_MAPPING["fast-chat"])
+    return ChatDeepInfra(model=model_id, temperature=0.7)
+
+def format_docs(docs):
+    return "\n\n".join(doc.page_content for doc in docs)
+
 def get_user_active_collection_key(user_id: str) -> str:
-    """Returns the Redis key that stores the user's current active collection name."""
     return f"user:{user_id}:active_collection"
 
 def create_and_store_vector_store(file_path: str, file_content: bytes, user_id: str):
-    """
-    Creates a unique vector store for a document and user, and sets it as the user's active collection.
-    """
     if EMBEDDINGS_INSTANCE is None:
         raise Exception("RAG indexing cannot proceed: Embeddings model not loaded.")
-
-    # 1. Create a unique, repeatable collection name for this specific document
+    
     file_hash = hashlib.md5(file_content).hexdigest()
     collection_name = f"user_{user_id}_doc_{file_hash}"
     logging.info(f"Creating collection: {collection_name}")
 
-    # 2. Load, split, and index the document into the new collection
     try:
         loader = PyPDFLoader(file_path)
         documents = loader.load()
@@ -99,7 +142,6 @@ def create_and_store_vector_store(file_path: str, file_content: bytes, user_id: 
             connection=DB_URL
         )
         
-        # 3. CRITICAL: Store this new collection name in Redis as the user's active one
         active_collection_key = get_user_active_collection_key(user_id)
         REDIS_CLIENT_INSTANCE.set(active_collection_key, collection_name)
         
@@ -109,7 +151,6 @@ def create_and_store_vector_store(file_path: str, file_content: bytes, user_id: 
         return False
 
 # --- 6. FastAPI Endpoints ---
-
 class ChatRequest(BaseModel):
     conversation_id: str
     model_key: str
@@ -117,13 +158,11 @@ class ChatRequest(BaseModel):
 
 @app.post("/upload_document")
 async def upload_document(file: UploadFile = File(...), current_user: User = Security(get_current_user)):
-    """Accepts a file, saves it, and creates a user-specific RAG index."""
     os.makedirs("./temp_files", exist_ok=True)
     file_path = os.path.join("./temp_files", file.filename)
     
-    # Read file content to pass for hashing
     file_content = await file.read()
-    await file.seek(0) # Reset file pointer after reading
+    await file.seek(0)
 
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
@@ -135,7 +174,6 @@ async def upload_document(file: UploadFile = File(...), current_user: User = Sec
 
 @app.post("/clear_document_context")
 def clear_document_context(current_user: User = Security(get_current_user)):
-    """Clears the active document context for the user, returning them to PURE_CHAT mode."""
     active_collection_key = get_user_active_collection_key(current_user.user_id)
     deleted_count = REDIS_CLIENT_INSTANCE.delete(active_collection_key)
     
@@ -149,22 +187,16 @@ async def chat_with_rag(request: ChatRequest, current_user: User = Security(get_
     user_id = current_user.user_id
     llm_instance = get_llm_for_user(request.model_key)
     
-    # 1. Retrieve chat history from Redis (same as before)
     history_key = f"chat:{user_id}:{request.conversation_id}"
     history_raw = REDIS_CLIENT_INSTANCE.lrange(history_key, 0, -1)
-    history_string = "\n".join([f"{json.loads(m)['type']}: {json.loads(m)['content']}" for m in history_raw])
+    history_string = "\n".join([f"{json.loads(m.decode('utf-8'))['type']}: {json.loads(m.decode('utf-8'))['content']}" for m in history_raw])
 
-    # 2. NEW: Check if the user has an active RAG collection in Redis
     active_collection_key = get_user_active_collection_key(user_id)
     active_collection_name = REDIS_CLIENT_INSTANCE.get(active_collection_key)
 
     if active_collection_name:
-        # --- RAG MODE ---
-        # Decode the collection name from bytes to string
         collection_name_str = active_collection_name.decode('utf-8')
         logging.info(f"User {user_id} using RAG with collection: {collection_name_str}")
-
-        # Instantiate a PGVector store on-the-fly for this specific request
         vector_store = PGVector(
             embedding_function=EMBEDDINGS_INSTANCE,
             collection_name=collection_name_str,
@@ -172,29 +204,49 @@ async def chat_with_rag(request: ChatRequest, current_user: User = Security(get_
         )
         retriever = vector_store.as_retriever(search_kwargs={"k": 3})
         
-        # ... RAG chain logic (same as before) ...
-        selected_prompt = strict_prompt # or flexible_prompt
-        mode = "STRICT_RAG"
-        chat_chain = ({"context": retriever, "question": RunnablePassthrough(), "chat_history": lambda x: history_string} | selected_prompt | llm_instance | StrOutputParser())
+        mode = "FLEXIBLE_RAG" 
+        chat_chain = (
+            {"context": retriever | format_docs, "question": itemgetter("question"), "chat_history": itemgetter("chat_history")} 
+            | flexible_prompt 
+            | llm_instance 
+            | StrOutputParser()
+        )
     else:
-        # --- PURE CHAT MODE ---
         logging.info(f"User {user_id} in PURE_CHAT mode.")
         mode = "PURE_CHAT"
-        chat_chain = ({"question": RunnablePassthrough(), "chat_history": lambda x: history_string} | pure_prompt | llm_instance | StrOutputParser())
+        chat_chain = ({"question": itemgetter("question"), "chat_history": itemgetter("chat_history")} | pure_prompt | llm_instance | StrOutputParser())
     
-    # 3. Generation & History Update (same as before)
     try:
-        response_text = chat_chain.invoke(request.message)
-        # ... save history to Redis ...
-        return {"response": response_text, "mode": mode}
+        response_text = chat_chain.invoke({"question": request.message, "chat_history": history_string})
+        history_to_save = [{"type": "human", "content": request.message}, {"type": "ai", "content": response_text}]
+        for message in history_to_save:
+            REDIS_CLIENT_INSTANCE.rpush(history_key, json.dumps(message))
+        return {"response": response_text, "model_used": llm_instance.model_name, "conversation_id": request.conversation_id, "mode": mode}
     except Exception as e:
-        # ... error handling ...
+        logging.error(f"LLM Inference Error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
-# --- 7. Utility Endpoints (omitted for brevity) ---
+# --- 7. Utility Endpoints ---
 @app.get("/get_conversations")
-def get_conversations(current_user: User = Security(get_current_user)): #...
-    return {"conversation_ids": []}
+def get_conversations(current_user: User = Security(get_current_user)):
+    if REDIS_CLIENT_INSTANCE is None:
+        raise HTTPException(status_code=500, detail="Redis connection failed.")
+    
+    user_id = current_user.user_id
+    conversation_ids = []
+    pattern = f"chat:{user_id}:*"
+    for key in REDIS_CLIENT_INSTANCE.scan_iter(match=pattern):
+        conv_id = key.decode('utf-8').split(':')[-1]
+        conversation_ids.append(conv_id)
+    return {"conversation_ids": conversation_ids}
 
 @app.get("/history/{conversation_id}")
-def get_history(conversation_id: str, current_user: User = Security(get_current_user)): #...
-    return {"history": []}
+def get_history(conversation_id: str, current_user: User = Security(get_current_user)):
+    if REDIS_CLIENT_INSTANCE is None:
+         raise HTTPException(status_code=500, detail="Redis connection failed.")
+         
+    user_id = current_user.user_id
+    history_key = f"chat:{user_id}:{conversation_id}"
+    history_raw = REDIS_CLIENT_INSTANCE.lrange(history_key, 0, -1)
+    messages_list = [json.loads(msg.decode('utf-8')) for msg in history_raw]
+    return {"conversation_id": conversation_id, "history": messages_list}
