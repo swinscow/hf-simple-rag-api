@@ -1,11 +1,10 @@
-# main.py - FINAL PRODUCTION CODE (Multi-User RAG Logic)
+# main.py - FINAL PRODUCTION CODE (Corrected Multi-User RAG Logic)
 
 # --- 1. Dependencies and Setup ---
 from fastapi import FastAPI, UploadFile, File, HTTPException, Security
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from dotenv import load_dotenv 
 from contextlib import asynccontextmanager 
-from sqlalchemy import create_engine
 from auth import get_current_user, User 
 import logging
 import os
@@ -21,16 +20,8 @@ from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_deepinfra import ChatDeepInfra
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_postgres import PGVector 
-
-# --- Pydantic Models ---
-class GroundingDecision(BaseModel):
-    is_general_knowledge: bool = Field(
-        ..., 
-        description="True if the user is asking a question that requires external, non-document knowledge, OR if the user explicitly tells the model to use its general knowledge. False if the user asks to stick strictly to the document."
-    )
 
 # --- 2. Configuration and Initialization ---
 load_dotenv()
@@ -73,22 +64,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# --- Health Check, Prompts, and Helper Functions ---
+# --- 4. Prompt Definitions ---
 @app.get("/", include_in_schema=False)
 def health_check(): return {"status": "ok"}
 
-STRICT_RAG_PROMPT = """You are an expert Q&A assistant. Your ONLY source of truth is the provided CONTEXT. Answer the user's question ONLY based on the CONTEXT. If the CONTEXT does not contain the answer, state explicitly that the information is unavailable in the documents.
-
-CONTEXT:
-{context}
-
-CHAT HISTORY:
-{chat_history}
-
-QUESTION:
-{question}
-"""
-strict_prompt = ChatPromptTemplate.from_template(STRICT_RAG_PROMPT)
 FLEXIBLE_RAG_PROMPT = """You are a helpful assistant. Use the provided CONTEXT first to answer the question. If the CONTEXT is insufficient or empty, use your general knowledge to provide a comprehensive answer.
 
 CONTEXT:
@@ -101,6 +80,7 @@ QUESTION:
 {question}
 """
 flexible_prompt = ChatPromptTemplate.from_template(FLEXIBLE_RAG_PROMPT)
+
 PURE_CHAT_PROMPT = """You are a friendly and helpful general knowledge assistant. Use your knowledge to answer the user's question and maintain the conversation flow.
 
 CHAT HISTORY:
@@ -111,6 +91,7 @@ QUESTION:
 """
 pure_prompt = ChatPromptTemplate.from_template(PURE_CHAT_PROMPT)
 
+# --- 5. Core Helper Functions ---
 def get_llm_for_user(model_key: str):
     model_id = MODEL_MAPPING.get(model_key, MODEL_MAPPING["fast-chat"])
     return ChatDeepInfra(model=model_id, temperature=0.7)
@@ -189,7 +170,7 @@ async def chat_with_rag(request: ChatRequest, current_user: User = Security(get_
     
     history_key = f"chat:{user_id}:{request.conversation_id}"
     history_raw = REDIS_CLIENT_INSTANCE.lrange(history_key, 0, -1)
-    history_string = "\n".join([f"{json.loads(m.decode('utf-8'))['type']}: {json.loads(m.decode('utf-8'))['content']}" for m in history_raw])
+    history_string = "\n".join([f"{json.loads(m.decode('utf-8'))['type'].capitalize()}: {json.loads(m.decode('utf-8'))['content']}" for m in history_raw])
 
     active_collection_key = get_user_active_collection_key(user_id)
     active_collection_name = REDIS_CLIENT_INSTANCE.get(active_collection_key)
@@ -206,7 +187,7 @@ async def chat_with_rag(request: ChatRequest, current_user: User = Security(get_
         
         mode = "FLEXIBLE_RAG" 
         chat_chain = (
-            {"context": retriever | format_docs, "question": itemgetter("question"), "chat_history": itemgetter("chat_history")} 
+            {"context": retriever | format_docs, "question": itemgetter("question"), "chat_history": lambda x: history_string} 
             | flexible_prompt 
             | llm_instance 
             | StrOutputParser()
@@ -214,10 +195,15 @@ async def chat_with_rag(request: ChatRequest, current_user: User = Security(get_
     else:
         logging.info(f"User {user_id} in PURE_CHAT mode.")
         mode = "PURE_CHAT"
-        chat_chain = ({"question": itemgetter("question"), "chat_history": itemgetter("chat_history")} | pure_prompt | llm_instance | StrOutputParser())
+        chat_chain = (
+            {"question": itemgetter("question"), "chat_history": lambda x: history_string} 
+            | pure_prompt 
+            | llm_instance 
+            | StrOutputParser()
+        )
     
     try:
-        response_text = chat_chain.invoke({"question": request.message, "chat_history": history_string})
+        response_text = chat_chain.invoke({"question": request.message})
         history_to_save = [{"type": "human", "content": request.message}, {"type": "ai", "content": response_text}]
         for message in history_to_save:
             REDIS_CLIENT_INSTANCE.rpush(history_key, json.dumps(message))
