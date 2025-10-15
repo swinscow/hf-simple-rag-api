@@ -7,11 +7,12 @@ import uuid
 from supabase import create_client, Client
 
 # --- CONFIGURATION ---
-API_BASE_URL = "https://your-fastapi-backend-url.onrender.com"  # <-- MAKE SURE THIS IS YOUR CORRECT BACKEND URL
+API_BASE_URL = "https://fastapi-backend-tq2s.onrender.com/"  # <-- MAKE SURE THIS IS YOUR CORRECT BACKEND URL
 
-# Use Streamlit secrets for Supabase credentials
-SUPABASE_URL = "YOUR_SUPABASE_URL"
-SUPABASE_KEY = "YOUR_SUPABASE_ANON_KEY"
+# Use Streamlit secrets for Supabase credentials in a real app
+# For now, we'll place them here.
+SUPABASE_URL = "https://nleucprtizqqofaitqcu.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5sZXVjcHJ0aXpxcW9mYWl0cWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjAwNDc3OTcsImV4cCI6MjA3NTYyMzc5N30.3y7GSxNsIcXGSVtcFmdkoR0W12jCOGAYYhkjk6HV4qg" # IMPORTANT: Use the ANON key, not the service key
 
 # --- INITIALIZE SUPABASE CLIENT ---
 try:
@@ -22,7 +23,7 @@ except Exception as e:
 
 
 st.set_page_config(layout="wide")
-st.title("🧠 Open-Source LLM Platform (MVP)")
+st.title("Welcome to pueblo ai (MVP version)")
 
 # --- Session State Management ---
 if 'auth_token' not in st.session_state:
