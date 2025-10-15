@@ -20,7 +20,7 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_deepinfra import ChatDeepInfra
-from langchain_core.runnables import RunnablePassthrough
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_postgres import PGVector
@@ -211,9 +211,16 @@ async def chat_with_rag(request: ChatRequest, current_user: User = Security(get_
         collection_name_str = active_collection_name.decode('utf-8')
         logging.info(f"User {user_id} using RAG with collection: {collection_name_str}")
         mode = "FLEXIBLE_RAG"
+
+        # This retriever chain adds the collection_name to the input dictionary,
+        # then passes it to the manual_retriever function.
+        retriever = RunnablePassthrough.assign(
+            collection_name=lambda x: collection_name_str
+        ) | RunnableLambda(manual_retriever)
+
         rag_chain = (
             {
-                "context": (lambda x: {"question": x["question"], "collection_name": collection_name_str}) | manual_retriever | format_docs,
+                "context": retriever | RunnableLambda(format_docs),
                 "question": itemgetter("question"),
                 "chat_history": itemgetter("chat_history")
             }
@@ -265,3 +272,4 @@ def get_history(conversation_id: str, current_user: User = Security(get_current_
     history_raw = REDIS_CLIENT_INSTANCE.lrange(history_key, 0, -1)
     messages_list = [json.loads(msg.decode('utf-8')) for msg in history_raw]
     return {"conversation_id": conversation_id, "history": messages_list}
+
