@@ -257,13 +257,13 @@ async def upload_document(file: UploadFile = File(...)):
 @app.post("/chat")
 async def chat_with_rag(
     request: ChatRequest, 
-    # current_user: User = Security(get_current_user) 
+    current_user: User = Security(get_current_user) 
 ):
     global vector_store
     global REDIS_CLIENT_INSTANCE
 
     # --- SECURITY BYPASS: Set user_id for testing (MUST BE REMOVED LATER) ---
-    user_id = "SUPABASE_REDIS_TESTER"
+    user_id = current_user.user_id
     
     # 1. Initialization and Retrieval
     session_id = f"{user_id}_{request.conversation_id}"
