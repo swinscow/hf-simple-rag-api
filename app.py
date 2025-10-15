@@ -8,7 +8,7 @@ from datetime import datetime
 
 # --- CONFIGURATION (UPDATE THIS FOR DEPLOYMENT) ---
 # Use your Render public URL as the base API endpoint
-API_BASE_URL = "https://hf-simple-rag-api.onrender.com"  # <-- REPLACE WITH YOUR ACTUAL RENDER URL
+API_BASE_URL = "https://fastapi-backend-tq2s.onrender.com/"  # <-- REPLACE WITH YOUR ACTUAL RENDER URL
 TEST_USER_ID = "SUPABASE_REDIS_TESTER" # Same ID used for the current memory storage
 # ---------------------------------------------------
 
