@@ -7,7 +7,7 @@ import uuid
 from supabase import create_client, Client
 
 # --- CONFIGURATION ---
-API_BASE_URL = "https://your-fastapi-backend-url.onrender.com"  # <-- MAKE SURE THIS IS YOUR CORRECT BACKEND URL
+API_BASE_URL = "https://fastapi-backend-tq2s.onrender.com/"  # <-- MAKE SURE THIS IS YOUR CORRECT BACKEND URL
 
 # Use Streamlit secrets for Supabase credentials in a real app
 # For now, we'll place them here.
