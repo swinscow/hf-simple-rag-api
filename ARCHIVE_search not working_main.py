@@ -177,10 +177,7 @@ def google_search(query: str) -> List[Document]:
         logging.error("google-api-python-client is not installed. Please add it to requirements.txt.")
         return []
     except Exception as e:
-        # --- THIS IS THE FIX ---
-        # This will now log the specific error from Google's servers.
-        logging.error(f"Google Search failed with a specific API error: {e}", exc_info=True)
-        # ----------------------
+        logging.error(f"Google Search failed: {e}", exc_info=True)
         return []
 
 def manual_retriever(input_dict: dict) -> List[Document]:
