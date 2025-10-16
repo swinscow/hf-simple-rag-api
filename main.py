@@ -1,4 +1,4 @@
-# main.py - FINAL STABLE VERSION (Bypasses PGVector Class with Manual SQL Retriever)
+# main.py - FINAL STABLE VERSION (With Combined RAG + Search Logic)
 
 # --- 1. Dependencies and Setup ---
 from fastapi import FastAPI, UploadFile, File, HTTPException, Security
@@ -15,12 +15,13 @@ from operator import itemgetter
 from redis import Redis
 import hashlib
 import psycopg # For direct database connection
-from langchain_core.documents import Document # To format SQL results
+from googleapiclient.discovery import build # For Google Search
+from langchain_core.documents import Document
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_deepinfra import ChatDeepInfra
-from langchain_core.runnables import RunnablePassthrough, RunnableLambda
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda, RunnableParallel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_postgres import PGVector
@@ -39,6 +40,11 @@ REDIS_URL = os.getenv("REDIS_URL")
 deepinfra_key = os.getenv("DEEPINFRA_API_KEY")
 os.environ['OPENAI_API_KEY'] = deepinfra_key
 os.environ['OPENAI_API_BASE'] = DEEPINFRA_BASE_URL
+
+# Google Search API Credentials
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
+
 
 global EMBEDDINGS_INSTANCE
 global REDIS_CLIENT_INSTANCE
@@ -70,9 +76,12 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/", include_in_schema=False)
 def health_check(): return {"status": "ok"}
 
-FLEXIBLE_RAG_PROMPT = """You are a helpful assistant. Use the provided CONTEXT first to answer the question. If the CONTEXT is insufficient or empty, use your general knowledge to provide a comprehensive answer.
+DOCUMENT_QA_PROMPT = """You are an expert Q&A assistant for user-provided documents.
+Your goal is to answer the user's QUESTION using the information from the DOCUMENT CONTEXT below.
+If the context is insufficient, you may use your general knowledge.
+IMPORTANT: Do not refer to the document or the context in your response. Answer the question directly and concisely as if you are an expert on the document's contents.
 
-CONTEXT:
+DOCUMENT CONTEXT:
 {context}
 
 CHAT HISTORY:
@@ -81,7 +90,7 @@ CHAT HISTORY:
 QUESTION:
 {question}
 """
-flexible_prompt = ChatPromptTemplate.from_template(FLEXIBLE_RAG_PROMPT)
+document_qa_prompt = ChatPromptTemplate.from_template(DOCUMENT_QA_PROMPT)
 
 PURE_CHAT_PROMPT = """You are a friendly and helpful general knowledge assistant. Use your knowledge to answer the user's question and maintain the conversation flow.
 
@@ -92,6 +101,42 @@ QUESTION:
 {question}
 """
 pure_prompt = ChatPromptTemplate.from_template(PURE_CHAT_PROMPT)
+
+SEARCH_PROMPT = """You are a helpful research assistant. Answer the user's QUESTION using the provided WEB SEARCH RESULTS.
+Summarize the key information and provide a comprehensive answer.
+Cite your sources by including the URL at the end of relevant sentences.
+
+WEB SEARCH RESULTS:
+{context}
+
+CHAT HISTORY:
+{chat_history}
+
+QUESTION:
+{question}
+"""
+search_prompt = ChatPromptTemplate.from_template(SEARCH_PROMPT)
+
+# NEW: Prompt for combining both Document and Search results
+RAG_AND_SEARCH_PROMPT = """You are an expert research assistant. Your primary goal is to answer the user's QUESTION using the DOCUMENT CONTEXT.
+If the document is insufficient, supplement your answer with the provided WEB SEARCH RESULTS.
+Synthesize the information from both sources to provide a complete and comprehensive answer.
+Cite web sources by including the URL at the end of relevant sentences.
+
+DOCUMENT CONTEXT:
+{doc_context}
+
+WEB SEARCH RESULTS:
+{web_context}
+
+CHAT HISTORY:
+{chat_history}
+
+QUESTION:
+{question}
+"""
+rag_and_search_prompt = ChatPromptTemplate.from_template(RAG_AND_SEARCH_PROMPT)
+
 
 # --- 5. Core Helper Functions ---
 def get_llm_for_user(model_key: str):
@@ -118,7 +163,6 @@ def create_and_store_vector_store(file_path: str, file_content: bytes, user_id: 
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         splits = text_splitter.split_documents(documents)
 
-        # This method for CREATING collections is stable and works correctly.
         PGVector.from_documents(
             documents=splits,
             embedding=EMBEDDINGS_INSTANCE,
@@ -135,9 +179,6 @@ def create_and_store_vector_store(file_path: str, file_content: bytes, user_id: 
         return False
 
 def manual_retriever(input_dict: dict) -> List[Document]:
-    """
-    Performs a direct SQL query for vector similarity search, bypassing the failing PGVector class initializer.
-    """
     question = input_dict["question"]
     collection_name = input_dict["collection_name"]
 
@@ -157,7 +198,7 @@ def manual_retriever(input_dict: dict) -> List[Document]:
                     ORDER BY embedding <=> %s
                     LIMIT 3
                     """,
-                    (collection_name, str(question_embedding)), # Pass embedding as a string
+                    (collection_name, str(question_embedding)),
                 )
                 results = cur.fetchall()
                 docs = [Document(page_content=row[0]) for row in results]
@@ -167,11 +208,34 @@ def manual_retriever(input_dict: dict) -> List[Document]:
         logging.error(f"Manual retriever failed: {e}", exc_info=True)
         return []
 
+def google_search(query: str) -> str:
+    """Performs a Google search and returns formatted results."""
+    if not GOOGLE_API_KEY or not GOOGLE_CSE_ID:
+        logging.warning("Google Search credentials are not configured.")
+        return "Search is not available."
+    try:
+        service = build("customsearch", "v1", developerKey=GOOGLE_API_KEY)
+        res = service.cse().list(q=query, cx=GOOGLE_CSE_ID, num=3).execute()
+        items = res.get("items", [])
+        
+        formatted_results = []
+        for item in items:
+            formatted_results.append(
+                f"Title: {item['title']}\n"
+                f"Snippet: {item['snippet']}\n"
+                f"URL: {item['link']}\n"
+            )
+        return "\n---\n".join(formatted_results)
+    except Exception as e:
+        logging.error(f"Google Search API error: {e}", exc_info=True)
+        return "An error occurred during the search."
+
 # --- 6. FastAPI Endpoints ---
 class ChatRequest(BaseModel):
     conversation_id: str
     model_key: str
     message: str
+    use_search: bool = False
 
 @app.post("/upload_document")
 async def upload_document(file: UploadFile = File(...), current_user: User = Security(get_current_user)):
@@ -205,40 +269,43 @@ async def chat_with_rag(request: ChatRequest, current_user: User = Security(get_
     history_string = "\n".join([f"{json.loads(m.decode('utf-8'))['type'].capitalize()}: {json.loads(m.decode('utf-8'))['content']}" for m in history_raw])
 
     active_collection_key = get_user_active_collection_key(user_id)
-    active_collection_name = REDIS_CLIENT_INSTANCE.get(active_collection_key)
+    active_collection_name = REDIS_CLIENT_INSTANCE.get(active_collection_name)
 
-    if active_collection_name:
+    # --- UPDATED: New Logic Branching ---
+    # Priority: (RAG + Search) > RAG > Search > Pure Chat
+    if active_collection_name and request.use_search:
         collection_name_str = active_collection_name.decode('utf-8')
-        logging.info(f"User {user_id} using RAG with collection: {collection_name_str}")
-        mode = "FLEXIBLE_RAG"
-
-        # This retriever chain adds the collection_name to the input dictionary,
-        # then passes it to the manual_retriever function.
-        retriever = RunnablePassthrough.assign(
-            collection_name=lambda x: collection_name_str
-        ) | RunnableLambda(manual_retriever)
-
-        rag_chain = (
-            {
-                "context": retriever | RunnableLambda(format_docs),
-                "question": itemgetter("question"),
-                "chat_history": itemgetter("chat_history")
-            }
-            | flexible_prompt
-            | llm_instance
-            | StrOutputParser()
+        logging.info(f"User {user_id} in RAG_AND_SEARCH mode with collection: {collection_name_str}")
+        mode = "RAG_AND_SEARCH"
+        
+        doc_retriever = RunnablePassthrough.assign(collection_name=lambda x: collection_name_str) | RunnableLambda(manual_retriever)
+        
+        # RunnableParallel allows us to run both retrievers at the same time
+        combined_retriever = RunnableParallel(
+            doc_context=doc_retriever | RunnableLambda(format_docs),
+            web_context=itemgetter("question") | RunnableLambda(google_search),
+            question=itemgetter("question"),
+            chat_history=itemgetter("chat_history")
         )
-        chat_chain = rag_chain
+        
+        chat_chain = combined_retriever | rag_and_search_prompt | llm_instance | StrOutputParser()
+
+    elif active_collection_name:
+        collection_name_str = active_collection_name.decode('utf-8')
+        logging.info(f"User {user_id} in DOCUMENT_QA mode with collection: {collection_name_str}")
+        mode = "DOCUMENT_QA"
+        retriever = RunnablePassthrough.assign(collection_name=lambda x: collection_name_str) | RunnableLambda(manual_retriever)
+        chat_chain = ({"context": retriever | RunnableLambda(format_docs), "question": itemgetter("question"), "chat_history": itemgetter("chat_history")} | document_qa_prompt | llm_instance | StrOutputParser())
+
+    elif request.use_search:
+        logging.info(f"User {user_id} in SEARCH_AUGMENTED mode.")
+        mode = "SEARCH_AUGMENTED"
+        chat_chain = ({"context": itemgetter("question") | RunnableLambda(google_search), "question": itemgetter("question"), "chat_history": itemgetter("chat_history")} | search_prompt | llm_instance | StrOutputParser())
+
     else:
         logging.info(f"User {user_id} in PURE_CHAT mode.")
         mode = "PURE_CHAT"
-        pure_chat_chain = (
-            {"question": itemgetter("question"), "chat_history": itemgetter("chat_history")}
-            | pure_prompt
-            | llm_instance
-            | StrOutputParser()
-        )
-        chat_chain = pure_chat_chain
+        chat_chain = ({"question": itemgetter("question"), "chat_history": itemgetter("chat_history")} | pure_prompt | llm_instance | StrOutputParser())
 
     try:
         response_text = chat_chain.invoke({"question": request.message, "chat_history": history_string})
