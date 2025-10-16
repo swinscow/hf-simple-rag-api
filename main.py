@@ -123,7 +123,14 @@ def get_llm_for_user(model_key: str):
     return ChatDeepInfra(model=model_id, temperature=0.7)
 
 def format_docs(docs: List[Document]) -> str:
-    return "\n\n".join(doc.page_content for doc in docs)
+    # Add source to content for search results
+    formatted_docs = []
+    for doc in docs:
+        content = doc.page_content
+        if "source" in doc.metadata:
+            content += f" (Source: {doc.metadata['source']})"
+        formatted_docs.append(content)
+    return "\n\n".join(formatted_docs)
 
 def get_user_active_collection_key(user_id: str) -> str:
     return f"user:{user_id}:active_collection"
@@ -236,11 +243,8 @@ async def chat_with_rag(request: ChatRequest, current_user: User = Security(get_
     history_raw = REDIS_CLIENT_INSTANCE.lrange(history_key, 0, -1)
     history_string = "\n".join([f"{json.loads(m.decode('utf-8'))['type'].capitalize()}: {json.loads(m.decode('utf-8'))['content']}" for m in history_raw])
 
-    # --- THIS IS THE FIX ---
-    # The key is retrieved first, then used to get the value.
     active_collection_key = get_user_active_collection_key(user_id)
     active_collection_name = REDIS_CLIENT_INSTANCE.get(active_collection_key)
-    # ----------------------
 
     if active_collection_name:
         collection_name_str = active_collection_name.decode('utf-8')
@@ -260,9 +264,15 @@ async def chat_with_rag(request: ChatRequest, current_user: User = Security(get_
     elif request.use_search:
         logging.info(f"User {user_id} using SEARCH mode.")
         mode = "SEARCH"
-        search_retriever = RunnableLambda(google_search)
+        
+        # --- THIS IS THE FIX for the search functionality ---
+        # The chain now correctly extracts the "question" and passes it to the search function.
         chat_chain = (
-            {"context": search_retriever | RunnableLambda(format_docs), "question": itemgetter("question"), "chat_history": itemgetter("chat_history")}
+            {
+                "context": itemgetter("question") | RunnableLambda(google_search) | RunnableLambda(format_docs),
+                "question": itemgetter("question"),
+                "chat_history": itemgetter("chat_history")
+            }
             | search_prompt
             | llm_instance
             | StrOutputParser()
