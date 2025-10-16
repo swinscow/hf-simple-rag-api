@@ -87,7 +87,7 @@ postgrest==2.22.0
 posthog==5.4.0
 propcache==0.4.1
 protobuf==6.32.1
-psycopg # KEPT: The modern, correct driver
+psycopg-binary # CORRECTED: Use the pre-compiled binary
 pyasn1==0.6.1
 pyasn1_modules==0.4.2
 pybase64==1.4.2
