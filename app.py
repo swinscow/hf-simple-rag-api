@@ -34,6 +34,8 @@ if 'messages' not in st.session_state:
     st.session_state.messages = []
 if 'use_search' not in st.session_state:
     st.session_state.use_search = False
+if 'use_premium_search' not in st.session_state: # NEW: Added premium search state
+    st.session_state.use_premium_search = False
 if 'active_document' not in st.session_state:
     st.session_state.active_document = None
 
@@ -75,7 +77,6 @@ def check_active_document():
         data = response.json()
         st.session_state.active_document = data.get("active_filename")
     except requests.exceptions.RequestException:
-        # Don't show an error, just fail silently
         st.session_state.active_document = None
 
 
@@ -86,7 +87,7 @@ def upload_and_index_document(file_to_upload):
             response = requests.post(f"{API_BASE_URL}/upload_document", headers=get_auth_headers(), files=files)
             response.raise_for_status()
             st.success(response.json().get("message", "Document indexed successfully!"))
-            st.session_state.active_document = file_to_upload.name # Optimistically update UI
+            st.session_state.active_document = file_to_upload.name
             st.rerun()
         except requests.exceptions.RequestException as e:
             st.error(f"Failed to upload document: {e}")
@@ -104,11 +105,13 @@ def start_new_chat_session():
 
 def call_api_and_get_response(prompt_text):
     headers = {"Content-Type": "application/json", **get_auth_headers()}
+    # MODIFIED: Added the new 'use_premium_search' flag to the payload
     payload = {
         "conversation_id": st.session_state.conversation_id,
         "model_key": st.session_state.model_key,
         "message": prompt_text,
-        "use_search": st.session_state.use_search
+        "use_search": st.session_state.use_search,
+        "use_premium_search": st.session_state.use_premium_search
     }
     try:
         response = requests.post(f"{API_BASE_URL}/chat", headers=headers, data=json.dumps(payload))
@@ -130,7 +133,7 @@ def get_all_conversations():
 
 def load_conversation_history(conversation_id):
     try:
-        start_new_chat_session() # Clear any existing document context
+        start_new_chat_session()
         response = requests.get(f"{API_BASE_URL}/history/{conversation_id}", headers=get_auth_headers())
         response.raise_for_status()
         history = response.json().get("history", [])
@@ -148,7 +151,6 @@ def load_conversation_history(conversation_id):
 if not st.session_state.auth_token:
     show_login_form()
 else:
-    # On first run after login, check for an active document
     if st.session_state.active_document is None:
         check_active_document()
 
@@ -157,15 +159,20 @@ else:
         st.header("Settings")
         st.session_state.model_key = st.selectbox("Select Model", options=["fast-chat", "smart-chat", "coding-expert"])
         
-        st.session_state.use_search = st.toggle("Enable Internet Search", value=False, disabled=(st.session_state.active_document is not None))
+        # MODIFIED: Added logic for the new premium search toggle
+        is_rag_active = st.session_state.active_document is not None
+        st.session_state.use_search = st.toggle("Enable Internet Search", value=False, disabled=is_rag_active)
         
+        if st.session_state.use_search:
+            st.session_state.use_premium_search = st.toggle("✨ Premium Search (Tavily)", value=False, help="Uses a more advanced search provider for higher quality results at a higher cost.")
+
         st.markdown("---")
         
         if st.button("➕ Start New Chat", use_container_width=True):
-            start_new_chat_session() # Call the new backend endpoint first
+            start_new_chat_session()
             st.session_state.conversation_id = str(uuid.uuid4())
             st.session_state.messages = []
-            st.session_state.active_document = None # Clear local document state
+            st.session_state.active_document = None
             st.rerun()
             
         st.caption(f"Session: {st.session_state.conversation_id[:8]}...")
@@ -215,4 +222,3 @@ else:
         with st.chat_message("assistant"):
             st.markdown(ai_response)
             st.caption(f"Mode: {mode} | Model: {st.session_state.model_key}")
-

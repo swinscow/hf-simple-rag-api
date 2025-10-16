@@ -1,4 +1,4 @@
-# main.py - FINAL STABLE VERSION (with Dual Search Agents)
+# main.py - FINAL STABLE VERSION
 
 # --- 1. Dependencies and Setup ---
 from fastapi import FastAPI, UploadFile, File, HTTPException, Security
@@ -10,16 +10,11 @@ import logging
 import os
 import shutil
 import json
-import asyncio
-import requests
-import hashlib
-from typing import List, Optional
+from typing import List
 from operator import itemgetter
 from redis import Redis
+import hashlib
 import psycopg
-from bs4 import BeautifulSoup
-
-# LangChain and AI Model Imports
 from langchain_core.documents import Document
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -29,10 +24,7 @@ from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_postgres import PGVector
-
-# Search Provider Imports
-from googleapiclient.discovery import build
-from tavily import TavilyClient
+from googleapiclient.discovery import build # For Google Search
 
 # --- 2. Configuration and Initialization ---
 load_dotenv()
@@ -49,10 +41,8 @@ deepinfra_key = os.getenv("DEEPINFRA_API_KEY")
 os.environ['OPENAI_API_KEY'] = deepinfra_key
 os.environ['OPENAI_API_BASE'] = DEEPINFRA_BASE_URL
 
-# Search API Keys
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 global EMBEDDINGS_INSTANCE
 global REDIS_CLIENT_INSTANCE
@@ -104,26 +94,19 @@ QUESTION:
 """
 pure_prompt = ChatPromptTemplate.from_template(PURE_CHAT_PROMPT)
 
-RESEARCH_AGENT_PROMPT = """You are an expert research assistant. Your goal is to write a comprehensive, unbiased summary of the user's QUESTION based *only* on the provided WEB SEARCH RESULTS.
-
-Follow these instructions carefully:
-1.  Synthesize the information from all sources into a single, coherent answer.
-2.  Structure your answer using markdown for clarity (headings, bullet points, bold text).
-3.  For every single fact or claim you make, you MUST cite the source using the format [Source: URL].
-4.  If the provided context contains conflicting information, point it out.
-5.  Do not add any information that is not present in the WEB SEARCH RESULTS.
-6.  Answer the user's question directly and do not refer to "the provided context" or "the search results".
+SEARCH_PROMPT = """You are a helpful research assistant. Answer the user's QUESTION using the provided WEB SEARCH RESULTS. Summarize the key information and provide a comprehensive answer. Cite your sources by including the URL.
 
 WEB SEARCH RESULTS:
 {context}
-
+CHAT HISTORY:
+{chat_history}
 QUESTION:
 {question}
 """
-research_agent_prompt = ChatPromptTemplate.from_template(RESEARCH_AGENT_PROMPT)
+search_prompt = ChatPromptTemplate.from_template(SEARCH_PROMPT)
 
 
-# --- 5. Core Helper and Agent Functions ---
+# --- 5. Core Helper Functions ---
 def get_llm_for_user(model_key: str):
     model_id = MODEL_MAPPING.get(model_key, MODEL_MAPPING["fast-chat"])
     return ChatDeepInfra(model=model_id, temperature=0.7)
@@ -137,8 +120,11 @@ def format_docs(docs: List[Document]) -> str:
         formatted_docs.append(content)
     return "\n\n".join(formatted_docs)
 
-def get_user_active_collection_key(user_id: str) -> str: return f"user:{user_id}:active_collection"
-def get_user_active_filename_key(user_id: str) -> str: return f"user:{user_id}:active_filename"
+def get_user_active_collection_key(user_id: str) -> str:
+    return f"user:{user_id}:active_collection"
+
+def get_user_active_filename_key(user_id: str) -> str:
+    return f"user:{user_id}:active_filename"
 
 def create_and_store_vector_store(file_path: str, file_content: bytes, user_id: str, original_filename: str):
     if EMBEDDINGS_INSTANCE is None:
@@ -147,6 +133,7 @@ def create_and_store_vector_store(file_path: str, file_content: bytes, user_id: 
     collection_name = f"user_{user_id}_doc_{file_hash}"
     logging.info(f"Creating collection: {collection_name}")
     try:
+        # THIS LINE IS NOW CORRECTED
         loader = PyPDFLoader(file_path)
         documents = loader.load()
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
@@ -157,99 +144,36 @@ def create_and_store_vector_store(file_path: str, file_content: bytes, user_id: 
             collection_name=collection_name,
             connection=DB_URL
         )
+
+        # Store the collection name and the original filename in Redis
         active_collection_key = get_user_active_collection_key(user_id)
         REDIS_CLIENT_INSTANCE.set(active_collection_key, collection_name)
+        
         active_filename_key = get_user_active_filename_key(user_id)
         REDIS_CLIENT_INSTANCE.set(active_filename_key, original_filename)
+
         return True
     except Exception as e:
-        logging.error(f"RAG creation failed for {collection_name}: {e}", exc_info=True)
+        logging.error(f"RAG creation failed for collection {collection_name}: {e}", exc_info=True)
         return False
 
-# NEW: Refactored scraping function used by both agents
-async def scrape_url(url: str) -> Optional[Document]:
-    """Asynchronously scrapes a single URL and returns a Document."""
-    try:
-        # Use asyncio.to_thread to run the blocking requests call in a separate thread
-        response = await asyncio.to_thread(requests.get, url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
-        response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html.parser')
-        text_content = ' '.join(p.get_text() for p in soup.find_all('p'))
-        if len(text_content) > 100:
-            return Document(page_content=text_content, metadata={"source": url})
-        return None
-    except Exception as e:
-        logging.warning(f"Failed to scrape {url}: {e}")
-        return None
-
-# NEW: Common function to run the scraping and filtering logic
-async def scrape_and_filter_urls(urls: List[str]) -> List[Document]:
-    """Takes a list of URLs, scrapes them in parallel, and returns valid Documents."""
-    scrape_tasks = [scrape_url(url) for url in urls]
-    scraped_documents = await asyncio.gather(*scrape_tasks)
-    final_documents = [doc for doc in scraped_documents if doc]
-    logging.info(f"Successfully scraped {len(final_documents)}/{len(urls)} URLs.")
-    return final_documents
-
-# MODIFIED: The original google_search, now made async-compatible for the agent
-async def google_search(query: str) -> List[dict]:
-    """Performs a Google search and returns raw results."""
+def google_search(query: str) -> List[Document]:
     if not GOOGLE_API_KEY or not GOOGLE_CSE_ID:
         logging.warning("Google Search credentials are not set. Skipping search.")
         return []
     try:
         service = build("customsearch", "v1", developerKey=GOOGLE_API_KEY)
-        # Run the blocking API call in a separate thread
-        res = await asyncio.to_thread(service.cse().list(q=query, cx=GOOGLE_CSE_ID, num=3).execute)
-        return res.get("items", [])
+        res = service.cse().list(q=query, cx=GOOGLE_CSE_ID, num=3).execute()
+        results = res.get("items", [])
+        docs = [
+            Document(page_content=item["snippet"], metadata={"source": item["link"]})
+            for item in results
+        ]
+        logging.info(f"Google Search found {len(docs)} results for query: '{query}'")
+        return docs
     except Exception as e:
-        logging.error(f"Google Search API error: {e}", exc_info=True)
+        logging.error(f"Google Search failed with a specific API error: {e}", exc_info=True)
         return []
-
-# NEW: Agent for Standard (Google) Search
-async def run_google_research_agent(query: str, llm_instance) -> List[Document]:
-    logging.info("--- Running Standard Google Research Agent ---")
-    query_gen_prompt = ChatPromptTemplate.from_template("Generate 3 diverse search queries for: {question}")
-    query_gen_chain = query_gen_prompt | llm_instance | StrOutputParser()
-    generated_queries_str = await query_gen_chain.ainvoke({"question": query})
-    search_queries = [line for line in generated_queries_str.strip().split('\n') if line]
-    
-    search_tasks = [google_search(q) for q in search_queries]
-    search_results_lists = await asyncio.gather(*search_tasks)
-
-    unique_urls = {item['link'] for result_list in search_results_lists for item in result_list}
-    logging.info(f"Google Agent found {len(unique_urls)} unique URLs.")
-
-    return await scrape_and_filter_urls(list(unique_urls)[:5]) # Scrape top 5
-
-# NEW: Agent for Premium (Tavily) Search
-async def run_tavily_research_agent(query: str, llm_instance) -> List[Document]:
-    logging.info("--- Running Premium Tavily Research Agent ---")
-    if not TAVILY_API_KEY:
-        logging.error("Tavily API key not set. Falling back to Google search.")
-        return await run_google_research_agent(query, llm_instance)
-
-    query_gen_prompt = ChatPromptTemplate.from_template("Generate 3 diverse, advanced search queries for: {question}")
-    query_gen_chain = query_gen_prompt | llm_instance | StrOutputParser()
-    generated_queries_str = await query_gen_chain.ainvoke({"question": query})
-    search_queries = [line for line in generated_queries_str.strip().split('\n') if line]
-
-    tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
-    async def search_tavily(q):
-        try:
-            # Tavily's client might not be async, so we wrap the call
-            return await asyncio.to_thread(tavily_client.search, query=q, search_depth="advanced", max_results=3)
-        except Exception as e:
-            logging.error(f"Tavily search failed for '{q}': {e}")
-            return None
-    
-    search_tasks = [search_tavily(q) for q in search_queries]
-    search_results_lists = await asyncio.gather(*search_tasks)
-
-    unique_urls = {item['url'] for res_list in search_results_lists if res_list and 'results' in res_list for item in res_list['results']}
-    logging.info(f"Tavily Agent found {len(unique_urls)} unique URLs.")
-    
-    return await scrape_and_filter_urls(list(unique_urls)[:5]) # Scrape top 5
 
 def manual_retriever(input_dict: dict) -> List[Document]:
     question = input_dict["question"]
@@ -284,7 +208,6 @@ class ChatRequest(BaseModel):
     model_key: str
     message: str
     use_search: bool = False
-    use_premium_search: bool = False # NEW: Flag for premium search
 
 @app.post("/upload_document")
 async def upload_document(file: UploadFile = File(...), current_user: User = Security(get_current_user)):
@@ -316,70 +239,61 @@ def get_active_document(current_user: User = Security(get_current_user)):
         return {"active_filename": filename.decode('utf-8')}
     return {"active_filename": None}
 
+
 @app.post("/chat")
 async def chat_with_rag(request: ChatRequest, current_user: User = Security(get_current_user)):
     user_id = current_user.user_id
     llm_instance = get_llm_for_user(request.model_key)
-    synthesis_llm = get_llm_for_user("smart-chat")
-    
     history_key = f"chat:{user_id}:{request.conversation_id}"
     history_raw = REDIS_CLIENT_INSTANCE.lrange(history_key, 0, -1)
     history_string = "\n".join([f"{json.loads(m.decode('utf-8'))['type'].capitalize()}: {json.loads(m.decode('utf-8'))['content']}" for m in history_raw])
     
     active_collection_key = get_user_active_collection_key(user_id)
     active_collection_name = REDIS_CLIENT_INSTANCE.get(active_collection_key)
-    
-    chain_input = {"question": request.message, "chat_history": history_string}
-    response_text = ""
-    mode = ""
 
     if active_collection_name:
         collection_name_str = active_collection_name.decode('utf-8')
         logging.info(f"User {user_id} using RAG with collection: {collection_name_str}")
         mode = "DOCUMENT_QA"
         retriever = RunnableLambda(manual_retriever)
-        chain_input["collection_name"] = collection_name_str
         chat_chain = (
             {"context": retriever | RunnableLambda(format_docs), "question": itemgetter("question"), "chat_history": itemgetter("chat_history")}
-            | document_qa_prompt | llm_instance | StrOutputParser()
+            | document_qa_prompt
+            | llm_instance
+            | StrOutputParser()
         )
-        response_text = await chat_chain.ainvoke(chain_input)
-
     elif request.use_search:
-        if request.use_premium_search:
-            mode = "PREMIUM_SEARCH_AGENT"
-            documents = await run_tavily_research_agent(request.message, llm_instance)
-        else:
-            mode = "STANDARD_SEARCH_AGENT"
-            documents = await run_google_research_agent(request.message, llm_instance)
-        
-        if not documents:
-            response_text = "I couldn't find enough information online to answer that question."
-        else:
-            context_string = format_docs(documents)
-            chain_input = {"context": context_string, "question": request.message}
-            synthesis_chain = research_agent_prompt | synthesis_llm | StrOutputParser()
-            response_text = await synthesis_chain.ainvoke(chain_input)
+        logging.info(f"User {user_id} using SEARCH mode.")
+        mode = "SEARCH"
+        retriever = RunnableLambda(google_search)
+        chat_chain = (
+            {"context": retriever | RunnableLambda(format_docs), "question": itemgetter("question"), "chat_history": itemgetter("chat_history")}
+            | search_prompt
+            | llm_instance
+            | StrOutputParser()
+        )
     else:
         logging.info(f"User {user_id} in PURE_CHAT mode.")
         mode = "PURE_CHAT"
-        chat_chain = pure_prompt | llm_instance | StrOutputParser()
-        response_text = await chat_chain.ainvoke(chain_input)
+        chat_chain = (
+            {"question": itemgetter("question"), "chat_history": itemgetter("chat_history")}
+            | pure_prompt
+            | llm_instance
+            | StrOutputParser()
+        )
     
     try:
+        input_data = {"question": request.message, "chat_history": history_string}
+        if active_collection_name:
+            input_data["collection_name"] = active_collection_name.decode('utf-8')
+
+        response_text = chat_chain.invoke(input_data)
         history_to_save = [{"type": "human", "content": request.message}, {"type": "ai", "content": response_text}]
         for message in history_to_save:
             REDIS_CLIENT_INSTANCE.rpush(history_key, json.dumps(message))
-        
-        final_model_used = synthesis_llm.model_name if "SEARCH" in mode else llm_instance.model_name
-        return {
-            "response": response_text, 
-            "model_used": final_model_used, 
-            "conversation_id": request.conversation_id, 
-            "mode": mode
-        }
+        return {"response": response_text, "model_used": llm_instance.model_name, "conversation_id": request.conversation_id, "mode": mode}
     except Exception as e:
-        logging.error(f"LLM Inference/Caching Error: {e}", exc_info=True)
+        logging.error(f"LLM Inference Error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 # --- 7. Utility Endpoints ---
@@ -404,3 +318,4 @@ def get_history(conversation_id: str, current_user: User = Security(get_current_
     history_raw = REDIS_CLIENT_INSTANCE.lrange(history_key, 0, -1)
     messages_list = [json.loads(msg.decode('utf-8')) for msg in history_raw]
     return {"conversation_id": conversation_id, "history": messages_list}
+
