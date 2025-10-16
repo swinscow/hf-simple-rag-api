@@ -1,4 +1,4 @@
-# main.py - FINAL CORRECTED VERSION (with Intelligent Query Router)
+# main.py - FINAL DEFINITIVE VERSION (Self-Correcting Search Agent)
 
 # --- 1. Dependencies and Setup ---
 from fastapi import FastAPI, UploadFile, File, HTTPException, Security
@@ -13,7 +13,7 @@ import json
 import asyncio
 import requests
 import hashlib
-from typing import List, Optional, Literal
+from typing import List, Optional, Union
 from operator import itemgetter
 from redis import Redis
 import psycopg
@@ -25,8 +25,8 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_deepinfra import ChatDeepInfra
-from langchain_core.runnables import RunnablePassthrough, RunnableLambda
-from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
+from langchain_core.runnables import RunnableLambda
+from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_postgres import PGVector
 from tavily import TavilyClient
@@ -73,19 +73,23 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/", include_in_schema=False)
 def health_check(): return {"status": "ok"}
 
-# --- 4. Prompt Definitions ---
+
+# --- 4. Pydantic Models for Structured Output ---
+class SearchDecision(BaseModel):
+    requires_search: bool = Field(description="Set to true if a web search is absolutely necessary.")
+    search_query: str = Field(description="A concise, optimized search query for the web search engine.")
+
+class FinalAnswer(BaseModel):
+    answer: str = Field(description="The final answer to the user's question, based on internal knowledge.")
+
+class FirstPassOutput(BaseModel):
+    output: Union[SearchDecision, FinalAnswer]
+
+# --- 5. Prompt Definitions ---
 DOCUMENT_QA_PROMPT = ChatPromptTemplate.from_template("""You are an expert Q&A assistant for user-provided documents. Your goal is to answer the user's QUESTION using the information from the DOCUMENT CONTEXT below. If the context is insufficient, you may use your general knowledge. IMPORTANT: Do not refer to the document or the context in your response. Answer the question directly.
 
 DOCUMENT CONTEXT:
 {context}
-CHAT HISTORY:
-{chat_history}
-QUESTION:
-{question}
-""")
-
-PURE_CHAT_PROMPT = ChatPromptTemplate.from_template("""You are a friendly and helpful general knowledge assistant.
-
 CHAT HISTORY:
 {chat_history}
 QUESTION:
@@ -107,36 +111,28 @@ RESEARCH_AGENT_PROMPT = ChatPromptTemplate.from_template("""You are an expert-le
 {question}
 """)
 
-ROUTER_PROMPT = ChatPromptTemplate.from_template("""You are a hyper-efficient query routing assistant. Your sole job is to analyze the user's LATEST QUESTION and determine if a web search is absolutely necessary to answer it.
+FIRST_PASS_PROMPT = ChatPromptTemplate.from_template("""You are a powerful reasoning agent. Your first task is to determine if you can answer the user's question with your existing knowledge.
 
-**CRITICAL RULES:**
-- A web search is **REQUIRED** if the question involves:
-  - Any recent or future dates (e.g., "yesterday," "next week," "in October 2025").
-  - Real-time information (e.g., "what is the stock price of...?", "latest news," "weather today").
-  - Very specific or niche topics, people, or products that are not common knowledge.
-- A web search is **NOT** required for:
-  - General knowledge, historical facts, definitions (e.g., "Who was Shakespeare?", "What is gravity?").
-  - Simple conversational follow-ups (e.g., "Thank you," "Tell me more," "Can you rephrase that?").
+Analyze the USER'S QUESTION below.
+- If you are **confident** you can answer it fully and accurately without searching the web, provide the answer directly.
+- If the question involves **real-time information, future events, specific dates, or niche topics** you don't know about, you **MUST** decide to perform a web search. Do not apologize or explain your limitations.
 
-**EXAMPLES:**
-- User Question: "What were the main UK news headlines on October 15th, 2025?" -> **Classification: RESEARCH_REQUIRED** (Reason: Specific future date requires real-time news lookup).
-- User Question: "Who was the first person on the moon?" -> **Classification: GENERAL_KNOWLEDGE** (Reason: A well-established historical fact).
-- User Question: "That's interesting, thanks!" -> **Classification: CONVERSATIONAL** (Reason: Simple conversational response).
+You must respond in ONE of the following two JSON formats:
 
----
-**CONTEXT:**
-CHAT HISTORY:
-{chat_history}
+1.  If you can answer directly:
+    `{{"output": {{"answer": "Your detailed and helpful answer here."}}}}`
 
-LATEST QUESTION:
+2.  If you need to search:
+    `{{"output": {{"requires_search": true, "search_query": "A perfectly optimized search query here."}}}}`
+
+USER'S QUESTION:
 {question}
 
----
-Respond with a JSON object containing your classification based on the rules and examples above.
-Example: {{"query_type": "RESEARCH_REQUIRED"}}""")
+CHAT HISTORY:
+{chat_history}""")
 
-# --- 5. Core Helper and Agent Functions ---
-# ✅ CORRECTED: All helper functions are now fully included.
+
+# --- 6. Core Helper and Agent Functions ---
 def get_llm_for_user(model_key: str):
     model_id = MODEL_MAPPING.get(model_key, MODEL_MAPPING["fast-chat"])
     return ChatDeepInfra(model=model_id, temperature=0.7)
@@ -245,32 +241,11 @@ async def run_tavily_research_agent(query: str) -> List[Document]:
         logging.error(f"Tavily search failed: {e}", exc_info=True)
         return []
 
-class RouterResponse(BaseModel):
-    query_type: Literal["RESEARCH_REQUIRED", "GENERAL_KNOWLEDGE", "CONVERSATIONAL"] = Field(
-        description="The classification of the user's query."
-    )
-
-async def route_query(question: str, chat_history: str) -> str:
-    logging.info(f"Routing query: {question}")
-    router_llm = get_llm_for_user("fast-chat")
-    parser = JsonOutputParser(pydantic_object=RouterResponse)
-    
-    router_chain = ROUTER_PROMPT | router_llm | parser
-    
-    try:
-        result = await router_chain.ainvoke({"question": question, "chat_history": chat_history})
-        logging.info(f"Query classified as: {result['query_type']}")
-        return result['query_type']
-    except Exception as e:
-        logging.error(f"Router failed: {e}. Defaulting to GENERAL_KNOWLEDGE.")
-        return "GENERAL_KNOWLEDGE"
-
-# --- 6. FastAPI Endpoints ---
+# --- 7. FastAPI Endpoints ---
 class ChatRequest(BaseModel):
     conversation_id: str
     model_key: str
     message: str
-    use_search: bool = False
 
 @app.post("/upload_document")
 async def upload_document(file: UploadFile = File(...), current_user: User = Security(get_current_user)):
@@ -289,15 +264,17 @@ async def upload_document(file: UploadFile = File(...), current_user: User = Sec
 def start_new_chat(current_user: User = Security(get_current_user)):
     active_collection_key = get_user_active_collection_key(current_user.user_id)
     active_filename_key = get_user_active_filename_key(current_user.user_id)
-    REDIS_CLIENT_INSTANCE.delete(active_collection_key, active_filename_key)
+    if REDIS_CLIENT_INSTANCE:
+        REDIS_CLIENT_INSTANCE.delete(active_collection_key, active_filename_key)
     return {"message": "New chat session started, document context cleared."}
 
 @app.get("/get_active_document")
 def get_active_document(current_user: User = Security(get_current_user)):
     active_filename_key = get_user_active_filename_key(current_user.user_id)
-    filename = REDIS_CLIENT_INSTANCE.get(active_filename_key)
-    if filename:
-        return {"active_filename": filename.decode('utf-8')}
+    if REDIS_CLIENT_INSTANCE:
+        filename = REDIS_CLIENT_INSTANCE.get(active_filename_key)
+        if filename:
+            return {"active_filename": filename.decode('utf-8')}
     return {"active_filename": None}
 
 @app.post("/chat")
@@ -327,33 +304,57 @@ async def chat_with_rag(request: ChatRequest, current_user: User = Security(get_
             | DOCUMENT_QA_PROMPT | llm_instance | StrOutputParser()
         )
         response_text = await chat_chain.ainvoke(chain_input)
-    elif request.use_search:
-        query_type = await route_query(request.message, history_string)
-        
-        if query_type == "RESEARCH_REQUIRED":
-            mode = "RESEARCH_AGENT (Tavily)"
-            documents = await run_tavily_research_agent(request.message)
-            if not documents:
-                response_text = "I tried to search for that, but I couldn't find enough information online."
-            else:
-                context_string = format_docs(documents)
-                synthesis_chain = RESEARCH_AGENT_PROMPT | synthesis_llm | StrOutputParser()
-                response_text = await synthesis_chain.ainvoke({"context": context_string, "question": request.message})
-        else:
-            mode = f"PURE_CHAT ({query_type})"
-            chat_chain = PURE_CHAT_PROMPT | llm_instance | StrOutputParser()
-            response_text = await chat_chain.ainvoke({"question": request.message, "chat_history": history_string})
     else:
-        mode = "PURE_CHAT (Search Disabled)"
-        chat_chain = PURE_CHAT_PROMPT | llm_instance | StrOutputParser()
-        response_text = await chat_chain.ainvoke({"question": request.message, "chat_history": history_string})
+        # Self-Correcting Agent Logic
+        parser = JsonOutputParser(pydantic_object=FirstPassOutput)
+        first_pass_chain = FIRST_PASS_PROMPT | synthesis_llm | parser
+        
+        logging.info("--- Executing First Pass ---")
+        try:
+            first_pass_result = await first_pass_chain.ainvoke({
+                "question": request.message,
+                "chat_history": history_string
+            })
+            
+            decision = first_pass_result['output']
+            
+            if isinstance(decision, SearchDecision) and decision.requires_search:
+                logging.info(f"First pass decided search is required. Query: '{decision.search_query}'")
+                mode = "RESEARCH_AGENT (Self-Corrected)"
+                
+                documents = await run_tavily_research_agent(decision.search_query)
+                if not documents:
+                    response_text = "I tried to search for that, but I couldn't find enough information online."
+                else:
+                    context_string = format_docs(documents)
+                    synthesis_chain = RESEARCH_AGENT_PROMPT | synthesis_llm | StrOutputParser()
+                    response_text = await synthesis_chain.ainvoke({"context": context_string, "question": request.message})
+            
+            elif isinstance(decision, FinalAnswer):
+                logging.info("First pass answered directly from knowledge.")
+                mode = "PURE_CHAT (Confident Answer)"
+                response_text = decision.answer
+            
+            else:
+                logging.error(f"Unexpected output type from first pass: {type(decision)}")
+                response_text = "I encountered an unexpected error while processing your request."
+                mode = "ERROR"
 
+        except Exception as e:
+            logging.error(f"Error during self-correcting agent execution: {e}", exc_info=True)
+            # Fallback to simple chat if the structured output fails
+            mode = "PURE_CHAT (Fallback)"
+            fallback_chain = PURE_CHAT_PROMPT | llm_instance | StrOutputParser()
+            response_text = await fallback_chain.ainvoke({"question": request.message, "chat_history": history_string})
+
+
+    # Save history and return response
     try:
         history_to_save = [{"type": "human", "content": request.message}, {"type": "ai", "content": response_text}]
         for message in history_to_save:
             REDIS_CLIENT_INSTANCE.rpush(history_key, json.dumps(message))
         
-        final_model_used = synthesis_llm.model_name if "RESEARCH" in mode else llm_instance.model_name
+        final_model_used = synthesis_llm.model_name
         return {
             "response": response_text, 
             "model_used": final_model_used, 
@@ -364,7 +365,7 @@ async def chat_with_rag(request: ChatRequest, current_user: User = Security(get_
         logging.error(f"Final response stage error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- 7. Utility Endpoints ---
+# --- 8. Utility Endpoints ---
 @app.get("/get_conversations")
 def get_conversations(current_user: User = Security(get_current_user)):
     if REDIS_CLIENT_INSTANCE is None:
