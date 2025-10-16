@@ -1,4 +1,4 @@
-# main.py - FINAL STABLE VERSION (With Combined RAG + Search Logic)
+# main.py - FINAL STABLE VERSION
 
 # --- 1. Dependencies and Setup ---
 from fastapi import FastAPI, UploadFile, File, HTTPException, Security
@@ -14,17 +14,17 @@ from typing import List
 from operator import itemgetter
 from redis import Redis
 import hashlib
-import psycopg # For direct database connection
-from googleapiclient.discovery import build # For Google Search
+import psycopg
 from langchain_core.documents import Document
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_deepinfra import ChatDeepInfra
-from langchain_core.runnables import RunnablePassthrough, RunnableLambda, RunnableParallel
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_postgres import PGVector
+from googleapiclient.discovery import build # For Google Search
 
 # --- 2. Configuration and Initialization ---
 load_dotenv()
@@ -44,7 +44,6 @@ os.environ['OPENAI_API_BASE'] = DEEPINFRA_BASE_URL
 # Google Search API Credentials
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GOOGLE_CSE_ID = os.getenv("GOOGLE_CSE_ID")
-
 
 global EMBEDDINGS_INSTANCE
 global REDIS_CLIENT_INSTANCE
@@ -117,26 +116,6 @@ QUESTION:
 """
 search_prompt = ChatPromptTemplate.from_template(SEARCH_PROMPT)
 
-# NEW: Prompt for combining both Document and Search results
-RAG_AND_SEARCH_PROMPT = """You are an expert research assistant. Your primary goal is to answer the user's QUESTION using the DOCUMENT CONTEXT.
-If the document is insufficient, supplement your answer with the provided WEB SEARCH RESULTS.
-Synthesize the information from both sources to provide a complete and comprehensive answer.
-Cite web sources by including the URL at the end of relevant sentences.
-
-DOCUMENT CONTEXT:
-{doc_context}
-
-WEB SEARCH RESULTS:
-{web_context}
-
-CHAT HISTORY:
-{chat_history}
-
-QUESTION:
-{question}
-"""
-rag_and_search_prompt = ChatPromptTemplate.from_template(RAG_AND_SEARCH_PROMPT)
-
 
 # --- 5. Core Helper Functions ---
 def get_llm_for_user(model_key: str):
@@ -152,41 +131,51 @@ def get_user_active_collection_key(user_id: str) -> str:
 def create_and_store_vector_store(file_path: str, file_content: bytes, user_id: str):
     if EMBEDDINGS_INSTANCE is None:
         raise Exception("RAG indexing cannot proceed: Embeddings model not loaded.")
-
     file_hash = hashlib.md5(file_content).hexdigest()
     collection_name = f"user_{user_id}_doc_{file_hash}"
     logging.info(f"Creating collection: {collection_name}")
-
     try:
         loader = PyPDFLoader(file_path)
         documents = loader.load()
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
         splits = text_splitter.split_documents(documents)
-
         PGVector.from_documents(
             documents=splits,
             embedding=EMBEDDINGS_INSTANCE,
             collection_name=collection_name,
             connection=DB_URL
         )
-
         active_collection_key = get_user_active_collection_key(user_id)
         REDIS_CLIENT_INSTANCE.set(active_collection_key, collection_name)
-
         return True
     except Exception as e:
         logging.error(f"RAG creation failed for collection {collection_name}: {e}", exc_info=True)
         return False
 
+def google_search(query: str) -> List[Document]:
+    if not GOOGLE_API_KEY or not GOOGLE_CSE_ID:
+        logging.warning("Google Search credentials are not set. Skipping search.")
+        return []
+    try:
+        service = build("customsearch", "v1", developerKey=GOOGLE_API_KEY)
+        res = service.cse().list(q=query, cx=GOOGLE_CSE_ID, num=3).execute()
+        results = res.get("items", [])
+        docs = [
+            Document(page_content=item["snippet"], metadata={"source": item["link"]})
+            for item in results
+        ]
+        logging.info(f"Google Search found {len(docs)} results for query: '{query}'")
+        return docs
+    except Exception as e:
+        logging.error(f"Google Search failed: {e}", exc_info=True)
+        return []
+
 def manual_retriever(input_dict: dict) -> List[Document]:
     question = input_dict["question"]
     collection_name = input_dict["collection_name"]
-
     if not collection_name or EMBEDDINGS_INSTANCE is None:
         return []
-
     question_embedding = EMBEDDINGS_INSTANCE.embed_query(question)
-
     try:
         with psycopg.connect(DB_URL) as conn:
             with conn.cursor() as cur:
@@ -208,27 +197,6 @@ def manual_retriever(input_dict: dict) -> List[Document]:
         logging.error(f"Manual retriever failed: {e}", exc_info=True)
         return []
 
-def google_search(query: str) -> str:
-    """Performs a Google search and returns formatted results."""
-    if not GOOGLE_API_KEY or not GOOGLE_CSE_ID:
-        logging.warning("Google Search credentials are not configured.")
-        return "Search is not available."
-    try:
-        service = build("customsearch", "v1", developerKey=GOOGLE_API_KEY)
-        res = service.cse().list(q=query, cx=GOOGLE_CSE_ID, num=3).execute()
-        items = res.get("items", [])
-        
-        formatted_results = []
-        for item in items:
-            formatted_results.append(
-                f"Title: {item['title']}\n"
-                f"Snippet: {item['snippet']}\n"
-                f"URL: {item['link']}\n"
-            )
-        return "\n---\n".join(formatted_results)
-    except Exception as e:
-        logging.error(f"Google Search API error: {e}", exc_info=True)
-        return "An error occurred during the search."
 
 # --- 6. FastAPI Endpoints ---
 class ChatRequest(BaseModel):
@@ -268,44 +236,46 @@ async def chat_with_rag(request: ChatRequest, current_user: User = Security(get_
     history_raw = REDIS_CLIENT_INSTANCE.lrange(history_key, 0, -1)
     history_string = "\n".join([f"{json.loads(m.decode('utf-8'))['type'].capitalize()}: {json.loads(m.decode('utf-8'))['content']}" for m in history_raw])
 
+    # --- THIS IS THE FIX ---
+    # The key is retrieved first, then used to get the value.
     active_collection_key = get_user_active_collection_key(user_id)
-    active_collection_name = REDIS_CLIENT_INSTANCE.get(active_collection_name)
+    active_collection_name = REDIS_CLIENT_INSTANCE.get(active_collection_key)
+    # ----------------------
 
-    # --- UPDATED: New Logic Branching ---
-    # Priority: (RAG + Search) > RAG > Search > Pure Chat
-    if active_collection_name and request.use_search:
+    if active_collection_name:
         collection_name_str = active_collection_name.decode('utf-8')
-        logging.info(f"User {user_id} in RAG_AND_SEARCH mode with collection: {collection_name_str}")
-        mode = "RAG_AND_SEARCH"
-        
-        doc_retriever = RunnablePassthrough.assign(collection_name=lambda x: collection_name_str) | RunnableLambda(manual_retriever)
-        
-        # RunnableParallel allows us to run both retrievers at the same time
-        combined_retriever = RunnableParallel(
-            doc_context=doc_retriever | RunnableLambda(format_docs),
-            web_context=itemgetter("question") | RunnableLambda(google_search),
-            question=itemgetter("question"),
-            chat_history=itemgetter("chat_history")
-        )
-        
-        chat_chain = combined_retriever | rag_and_search_prompt | llm_instance | StrOutputParser()
-
-    elif active_collection_name:
-        collection_name_str = active_collection_name.decode('utf-8')
-        logging.info(f"User {user_id} in DOCUMENT_QA mode with collection: {collection_name_str}")
+        logging.info(f"User {user_id} using RAG with collection: {collection_name_str}")
         mode = "DOCUMENT_QA"
-        retriever = RunnablePassthrough.assign(collection_name=lambda x: collection_name_str) | RunnableLambda(manual_retriever)
-        chat_chain = ({"context": retriever | RunnableLambda(format_docs), "question": itemgetter("question"), "chat_history": itemgetter("chat_history")} | document_qa_prompt | llm_instance | StrOutputParser())
 
+        retriever = RunnablePassthrough.assign(
+            collection_name=lambda x: collection_name_str
+        ) | RunnableLambda(manual_retriever)
+
+        chat_chain = (
+            {"context": retriever | RunnableLambda(format_docs), "question": itemgetter("question"), "chat_history": itemgetter("chat_history")}
+            | document_qa_prompt
+            | llm_instance
+            | StrOutputParser()
+        )
     elif request.use_search:
-        logging.info(f"User {user_id} in SEARCH_AUGMENTED mode.")
-        mode = "SEARCH_AUGMENTED"
-        chat_chain = ({"context": itemgetter("question") | RunnableLambda(google_search), "question": itemgetter("question"), "chat_history": itemgetter("chat_history")} | search_prompt | llm_instance | StrOutputParser())
-
+        logging.info(f"User {user_id} using SEARCH mode.")
+        mode = "SEARCH"
+        search_retriever = RunnableLambda(google_search)
+        chat_chain = (
+            {"context": search_retriever | RunnableLambda(format_docs), "question": itemgetter("question"), "chat_history": itemgetter("chat_history")}
+            | search_prompt
+            | llm_instance
+            | StrOutputParser()
+        )
     else:
         logging.info(f"User {user_id} in PURE_CHAT mode.")
         mode = "PURE_CHAT"
-        chat_chain = ({"question": itemgetter("question"), "chat_history": itemgetter("chat_history")} | pure_prompt | llm_instance | StrOutputParser())
+        chat_chain = (
+            {"question": itemgetter("question"), "chat_history": itemgetter("chat_history")}
+            | pure_prompt
+            | llm_instance
+            | StrOutputParser()
+        )
 
     try:
         response_text = chat_chain.invoke({"question": request.message, "chat_history": history_string})
