@@ -1,4 +1,4 @@
-# app.py - Streamlit Frontend with Search Toggle
+# app.py - FINAL STABLE VERSION
 
 import streamlit as st
 import requests
@@ -21,7 +21,7 @@ except Exception as e:
 st.set_page_config(layout="wide")
 st.title("Welcome to Pueblo. Globally-affordable AI that puts the user first. (MVP)")
 
-# --- Session State Management ---
+# --- SESSION STATE INITIALIZATION ---
 if 'auth_token' not in st.session_state:
     st.session_state.auth_token = None
 if 'user_id' not in st.session_state:
@@ -31,29 +31,56 @@ if 'conversation_id' not in st.session_state:
 if 'messages' not in st.session_state:
     st.session_state.messages = []
 if 'use_search' not in st.session_state:
-    st.session_state.use_search = False # NEW: Initialize search state
+    st.session_state.use_search = False
 
-# --- Authentication Logic ---
+
+# --- AUTHENTICATION LOGIC ---
 def show_login_form():
-    # ... (code is unchanged)
     st.header("Login / Sign Up")
-    # ...
+    with st.form("login_form"):
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.form_submit_button("Login", use_container_width=True):
+                try:
+                    auth_response = supabase.auth.sign_in_with_password({"email": email, "password": password})
+                    st.session_state.auth_token = auth_response.session.access_token
+                    st.session_state.user_id = auth_response.user.id
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Login failed: {e}")
+        with col2:
+            if st.form_submit_button("Sign Up", use_container_width=True):
+                try:
+                    supabase.auth.sign_up({"email": email, "password": password})
+                    st.success("Sign up successful! Please check your email to verify.")
+                except Exception as e:
+                    st.error(f"Sign up failed: {e}")
 
-# --- API Call Functions ---
+
+# --- API CALL FUNCTIONS ---
 def get_auth_headers():
     return {"Authorization": f"Bearer {st.session_state.auth_token}"}
 
 def upload_and_index_document(file_to_upload):
-    # ... (code is unchanged)
     with st.spinner("Uploading and indexing document..."):
-        # ...
-        st.success("Document indexed!")
+        files = {"file": (file_to_upload.name, file_to_upload, "application/pdf")}
+        try:
+            response = requests.post(f"{API_BASE_URL}/upload_document", headers=get_auth_headers(), files=files)
+            response.raise_for_status()
+            st.success(response.json().get("message", "Document indexed successfully!"))
+        except requests.exceptions.RequestException as e:
+            st.error(f"Failed to upload document: {e}")
 
 def clear_document():
-    # ... (code is unchanged)
     with st.spinner("Clearing document context..."):
-        # ...
-        st.success("Context cleared!")
+        try:
+            response = requests.post(f"{API_BASE_URL}/clear_document_context", headers=get_auth_headers())
+            response.raise_for_status()
+            st.success(response.json().get("message", "Context cleared!"))
+        except requests.exceptions.RequestException as e:
+            st.error(f"Failed to clear context: {e}")
 
 def call_api_and_get_response(prompt_text):
     headers = {"Content-Type": "application/json", **get_auth_headers()}
@@ -61,7 +88,7 @@ def call_api_and_get_response(prompt_text):
         "conversation_id": st.session_state.conversation_id,
         "model_key": st.session_state.model_key,
         "message": prompt_text,
-        "use_search": st.session_state.use_search, # NEW: Pass the search setting
+        "use_search": st.session_state.use_search
     }
     try:
         response = requests.post(f"{API_BASE_URL}/chat", headers=headers, data=json.dumps(payload))
@@ -73,24 +100,40 @@ def call_api_and_get_response(prompt_text):
         return "Server connection failed.", "ERROR"
 
 def get_all_conversations():
-    # ... (code is unchanged)
-    return []
+    try:
+        response = requests.get(f"{API_BASE_URL}/get_conversations", headers=get_auth_headers())
+        response.raise_for_status()
+        return response.json().get("conversation_ids", [])
+    except requests.exceptions.RequestException:
+        st.sidebar.error("Could not load history.")
+        return []
 
 def load_conversation_history(conversation_id):
-    # ... (code is unchanged)
-    st.rerun()
+    try:
+        response = requests.get(f"{API_BASE_URL}/history/{conversation_id}", headers=get_auth_headers())
+        response.raise_for_status()
+        history = response.json().get("history", [])
+        st.session_state.messages = []
+        for msg in history:
+            role = "user" if msg.get("type") == "human" else "assistant"
+            st.session_state.messages.append({"role": role, "content": msg.get("content")})
+        st.session_state.conversation_id = conversation_id
+        st.rerun()
+    except requests.exceptions.RequestException as e:
+        st.error(f"Failed to load conversation: {e}")
 
-# --- Main App Logic ---
+
+# --- MAIN APP LOGIC ---
 if not st.session_state.auth_token:
     show_login_form()
 else:
+    # --- SIDEBAR ---
     with st.sidebar:
         st.header("Settings")
         st.session_state.model_key = st.selectbox("Select Model", options=["fast-chat", "smart-chat", "coding-expert"])
         
-        # NEW: Toggle switch for internet search
-        st.session_state.use_search = st.toggle("Enable Internet Search", value=st.session_state.use_search)
-        st.caption("Note: Document chat takes priority over search.")
+        # Search Toggle
+        st.session_state.use_search = st.toggle("Enable Internet Search", value=False)
         
         st.markdown("---")
         if st.button("➕ Start New Chat", use_container_width=True):
@@ -99,8 +142,16 @@ else:
             st.rerun()
         st.caption(f"Session: {st.session_state.conversation_id[:8]}...")
         st.markdown("---")
+        
         st.subheader("Chat History")
-        # ... (history display logic is unchanged)
+        conversations = get_all_conversations()
+        if not conversations:
+            st.caption("No past conversations found.")
+        else:
+            for conv_id in conversations:
+                if st.button(f"Chat: {conv_id[:8]}...", key=conv_id, use_container_width=True):
+                    load_conversation_history(conv_id)
+        
         st.markdown("---")
         st.subheader("RAG Document")
         uploaded_file = st.file_uploader("Upload PDF to chat with", type="pdf")
@@ -109,23 +160,28 @@ else:
                 upload_and_index_document(uploaded_file)
         if st.button("Clear Document Context", use_container_width=True):
             clear_document()
+        
         st.markdown("---")
         if st.button("Logout", use_container_width=True):
             st.session_state.auth_token = None
             st.session_state.user_id = None
             st.rerun()
 
-    # --- Chat Interface (unchanged) ---
+    # --- CHAT INTERFACE ---
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
+
     if prompt := st.chat_input("Ask a question..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
+
         with st.spinner("Thinking..."):
             ai_response, mode = call_api_and_get_response(prompt)
+            
         st.session_state.messages.append({"role": "assistant", "content": ai_response})
         with st.chat_message("assistant"):
             st.markdown(ai_response)
             st.caption(f"Mode: {mode} | Model: {st.session_state.model_key}")
+
