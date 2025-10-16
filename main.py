@@ -1,4 +1,4 @@
-# main.py - FINAL DEFINITIVE VERSION (Dynamic Strategy Generation)
+# main.py - FINAL ARCHITECTURE (Multi-Step Research Agent)
 
 # --- 1. Dependencies and Setup ---
 from fastapi import FastAPI, UploadFile, File, HTTPException, Security
@@ -87,6 +87,7 @@ class FinalAnswer(BaseModel):
 class FirstPassOutput(BaseModel):
     output: Union[SearchStrategy, FinalAnswer]
 
+
 # --- 5. Prompt Definitions ---
 DOCUMENT_QA_PROMPT = ChatPromptTemplate.from_template("""You are an expert Q&A assistant for user-provided documents. Your goal is to answer the user's QUESTION using the information from the DOCUMENT CONTEXT below. If the context is insufficient, you may use your general knowledge. IMPORTANT: Do not refer to the document or the context in your response. Answer the question directly.
 
@@ -98,58 +99,52 @@ QUESTION:
 {question}
 """)
 
-RESEARCH_AGENT_PROMPT = ChatPromptTemplate.from_template("""You are an expert-level research analyst. Your primary goal is to produce a high-quality, comprehensive, and unbiased summary of the user's QUESTION. You must base your answer *exclusively* on the provided WEB SEARCH RESULTS.
+MULTI_STEP_AGENT_PROMPT = """You are a world-class research assistant. Your goal is to answer the user's question with the most accurate, comprehensive, and well-sourced information available.
+
+You will work in a loop of Thought, Action, and Observation.
+
+**1. Thought:** First, analyze the user's query and the conversation history. Break down the problem. Formulate a plan or a hypothesis. Decide if you need to use a tool.
+**2. Action:** If you need to gather information, you have one tool available: `search`. You must call this tool with a perfectly optimized, keyword-rich search query.
+**3. Observation:** After you use the tool, you will be given the results.
+
+Repeat this process. With each loop, your knowledge will grow. You can perform multiple searches to explore different facets of a topic.
+
+- If you need to search for multiple things, do it in sequence, one search per loop.
+- Continue searching until you are confident you have enough information to construct a complete and factual answer.
+- Once you have gathered sufficient information, provide a final, comprehensive answer to the user. Do not output "Thought:" or "Action:" in your final response.
+
+You must respond in one of two JSON formats:
+
+A) To use the search tool:
+`{{"thought": "Your reasoning here...", "action": {{"tool": "search", "query": "Your expert search query here"}}}`
+
+B) To provide the final answer to the user:
+`{{"thought": "I have gathered enough information to answer the user's question.", "final_answer": "Your complete, well-written answer here."}}`
+
+Let's begin.
+
+Current Conversation:
+{chat_history}
+"""
+
+RESEARCH_SYNTHESIS_PROMPT = ChatPromptTemplate.from_template("""You are a research analyst. Your task is to synthesize the provided search results into a single, comprehensive answer to the user's original question.
 
 **Critical Instructions:**
-1.  **Synthesize, Don't List:** Weave the information together into a single, well-written narrative summary. Use paragraphs to structure your answer.
-2.  **Cite Everything:** This is the most important rule. **Every single sentence** you write must be followed by a citation to the source that supports it, like this: [Source: URL]. If a sentence is supported by multiple sources, cite them all, like this: [Source: URL1, URL2].
-3.  **No Outside Information:** Do not add any information, context, or opinions that are not explicitly found in the provided text.
-4.  **Handle Contradictions:** If sources conflict, point this out directly in your summary.
+1.  **Synthesize, Don't List:** Weave the information together into a single, well-written narrative summary.
+2.  **Cite Everything:** **Every single sentence** must be followed by a citation to the source that supports it, like this: [Source: URL].
+3.  **No Outside Information:** Do not add any information that is not explicitly found in the provided text.
 
-**WEB SEARCH RESULTS:**
+**SEARCH RESULTS:**
 {context}
 
-**QUESTION:**
-{question}
-""")
-
-QUERY_ANALYSIS_PROMPT = ChatPromptTemplate.from_template("""You are an expert search strategist. Your job is to analyze the user's query and decide if a search is needed. If it is, you must devise a search strategy.
-
-**Analyze the USER'S QUESTION:**
-1.  **Search Requirement:** Is the question about real-time events, news, specific dates, or niche topics that require up-to-date information?
-2.  **Topic Extraction:** What is the core subject of the query?
-3.  **Location Identification:** Is a specific country, city, or region mentioned?
-4.  **Source Suggestion:** Based on the topic and location, what are the 3-5 most authoritative and relevant websites to search? (e.g., for UK news, suggest 'bbc.co.uk', 'theguardian.com'; for US finance, suggest 'bloomberg.com', 'wsj.com').
-
-You must respond in ONE of the following two JSON formats:
-
-1.  If no search is needed (general knowledge):
-    `{{"output": {{"answer": "Your detailed and helpful answer here."}}}}`
-
-2.  If a search is required:
-    `{{"output": {{"requires_search": true, "topic": "...", "location": "...", "suggested_sources": ["...", "..."]}}}}`
-
-USER'S QUESTION: {question}
-CHAT HISTORY: {chat_history}""")
-
-EXPERT_QUERY_GENERATOR_PROMPT = ChatPromptTemplate.from_template("""You are a search query generator. Take the provided search strategy and the original user question to create a single, expert-level search query string for a search engine.
-
-**Instructions:**
-- Combine the topic and location into a concise query.
-- Use the `source:...` operator to prioritize the suggested sources. Combine them with `OR`.
-
-**Search Strategy:**
-{strategy}
-
-**Original User Question:**
+**USER'S ORIGINAL QUESTION:**
 {original_question}
-
-Return only the final search query string.
 """)
+
 
 # --- 6. Core Helper and Agent Functions ---
 def get_llm_for_user(model_key: str):
-    model_id = MODEL_MAPPING.get(model_key, MODEL_MAPPING["fast-chat"])
+    model_id = MODEL_MAPPING.get(model_key, MODEL_MAPPING["smart-chat"])
     return ChatDeepInfra(model=model_id, temperature=0.7)
 
 def format_docs(docs: List[Document]) -> str:
@@ -240,18 +235,21 @@ async def scrape_and_filter_urls(urls: List[str]) -> List[Document]:
     logging.info(f"Successfully scraped {len(final_documents)}/{len(urls)} URLs.")
     return final_documents
 
-async def run_tavily_research_agent(query: str) -> List[Document]:
-    logging.info(f"--- Running Tavily Research Agent with expert query: '{query}' ---")
+async def run_tavily_search(query: str) -> List[Document]:
+    logging.info(f"--- Running Tavily Search with query: '{query}' ---")
     if not TAVILY_API_KEY:
         logging.error("Tavily API key not set. Search will fail.")
         return []
     
     tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
     try:
-        search_results = await asyncio.to_thread(tavily_client.search, query=query, search_depth="advanced", max_results=7)
-        unique_urls = [item['url'] for item in search_results.get('results', [])]
-        logging.info(f"Tavily Agent found {len(unique_urls)} URLs.")
-        return await scrape_and_filter_urls(unique_urls)
+        search_results = await asyncio.to_thread(tavily_client.search, query=query, search_depth="advanced", max_results=5)
+        docs = [
+            Document(page_content=res.get("content", ""), metadata={"source": res.get("url")})
+            for res in search_results.get("results", [])
+        ]
+        logging.info(f"Tavily Agent found {len(docs)} results.")
+        return docs
     except Exception as e:
         logging.error(f"Tavily search failed: {e}", exc_info=True)
         return []
@@ -295,12 +293,18 @@ def get_active_document(current_user: User = Security(get_current_user)):
 @app.post("/chat")
 async def chat_with_rag(request: ChatRequest, current_user: User = Security(get_current_user)):
     user_id = current_user.user_id
-    llm_instance = get_llm_for_user(request.model_key)
-    synthesis_llm = get_llm_for_user("smart-chat")
+    agent_llm = get_llm_for_user(request.model_key)
     
     history_key = f"chat:{user_id}:{request.conversation_id}"
     history_raw = REDIS_CLIENT_INSTANCE.lrange(history_key, 0, -1)
-    history_string = "\n".join([json.loads(m.decode('utf-8'))['content'] for m in history_raw])
+    
+    # Format history for the agent
+    chat_history_for_agent = ""
+    for msg_raw in history_raw:
+        msg = json.loads(msg_raw.decode('utf-8'))
+        role = "Human" if msg['type'] == 'human' else "Assistant"
+        chat_history_for_agent += f"{role}: {msg['content']}\n"
+    chat_history_for_agent += f"Human: {request.message}\n"
 
     active_collection_key = get_user_active_collection_key(user_id)
     active_collection_name = REDIS_CLIENT_INSTANCE.get(active_collection_key)
@@ -313,71 +317,78 @@ async def chat_with_rag(request: ChatRequest, current_user: User = Security(get_
         logging.info(f"User {user_id} using RAG with collection: {collection_name_str}")
         mode = "DOCUMENT_QA"
         retriever = RunnableLambda(manual_retriever)
-        chain_input = {"collection_name": collection_name_str, "question": request.message, "chat_history": history_string}
+        chain_input = {"collection_name": collection_name_str, "question": request.message, "chat_history": chat_history_for_agent}
         chat_chain = (
             {"context": retriever | RunnableLambda(format_docs), "question": itemgetter("question"), "chat_history": itemgetter("chat_history")}
-            | DOCUMENT_QA_PROMPT | llm_instance | StrOutputParser()
+            | DOCUMENT_QA_PROMPT | agent_llm | StrOutputParser()
         )
         response_text = await chat_chain.ainvoke(chain_input)
     else:
-        # Dynamic Two-Step Strategy Agent
-        strategy_parser = JsonOutputParser(pydantic_object=FirstPassOutput)
-        strategy_chain = QUERY_ANALYSIS_PROMPT | synthesis_llm | strategy_parser
+        # Multi-Step Agent Logic
+        mode = "MULTI_STEP_AGENT"
         
-        logging.info("--- Step 1: Analyzing Query for Strategy ---")
-        try:
-            strategy_result = await strategy_chain.ainvoke({
-                "question": request.message,
-                "chat_history": history_string
-            })
+        all_gathered_docs = []
+        
+        # Agent loop
+        for i in range(3): # Limit to 3 turns to prevent runaways
+            logging.info(f"--- Agent Loop, Iteration {i+1} ---")
             
-            decision = strategy_result['output']
-            
-            if 'requires_search' in decision and decision['requires_search']:
-                logging.info(f"Generated search strategy: {decision}")
-                mode = "RESEARCH_AGENT (Dynamic Strategy)"
+            prompt = ChatPromptTemplate.from_template(MULTI_STEP_AGENT_PROMPT)
+            parser = JsonOutputParser()
+            agent_chain = prompt | agent_llm | parser
 
-                # Step 2: Generate the expert query
-                query_generator_chain = EXPERT_QUERY_GENERATOR_PROMPT | synthesis_llm | StrOutputParser()
-                expert_query = await query_generator_chain.ainvoke({
-                    "strategy": json.dumps(decision),
-                    "original_question": request.message
-                })
-                
-                documents = await run_tavily_research_agent(expert_query)
-                if not documents:
-                    response_text = "I tried to search for that, but I couldn't find enough information online."
+            agent_response = await agent_chain.ainvoke({"chat_history": chat_history_for_agent})
+
+            if "final_answer" in agent_response:
+                logging.info("Agent decided to provide final answer.")
+                # If we have gathered docs, synthesize them. Otherwise, use the direct answer.
+                if all_gathered_docs:
+                    synthesis_chain = RESEARCH_SYNTHESIS_PROMPT | agent_llm | StrOutputParser()
+                    context_string = format_docs(all_gathered_docs)
+                    response_text = await synthesis_chain.ainvoke({
+                        "context": context_string,
+                        "original_question": request.message
+                    })
                 else:
-                    context_string = format_docs(documents)
-                    synthesis_chain = RESEARCH_AGENT_PROMPT | synthesis_llm | StrOutputParser()
-                    response_text = await synthesis_chain.ainvoke({"context": context_string, "question": request.message})
+                    response_text = agent_response["final_answer"]
+                break # Exit the loop
             
-            elif 'answer' in decision:
-                logging.info("Strategy analysis answered directly from knowledge.")
-                mode = "PURE_CHAT (Confident Answer)"
-                response_text = decision['answer']
+            elif "action" in agent_response and agent_response["action"]["tool"] == "search":
+                query = agent_response["action"]["query"]
+                logging.info(f"Agent action: search(query='{query}')")
+                
+                search_docs = await run_tavily_search(query)
+                all_gathered_docs.extend(search_docs)
+                
+                observation = "Observation: \n" + "\n\n".join([f"Source: {doc.metadata['source']}\nContent: {doc.page_content}" for doc in search_docs])
+                chat_history_for_agent += f"Assistant:\n{json.dumps(agent_response)}\n{observation}\n"
             
             else:
-                logging.error(f"Unexpected output from strategy analysis: {decision}")
-                response_text = "I encountered an error planning how to answer your question."
-                mode = "ERROR"
-        except Exception as e:
-            logging.error(f"Error during dynamic strategy agent execution: {e}", exc_info=True)
-            mode = "PURE_CHAT (Fallback)"
-            fallback_chain = DOCUMENT_QA_PROMPT | llm_instance | StrOutputParser() # Using DOCUMENT_QA_PROMPT as a generic fallback
-            response_text = await fallback_chain.ainvoke({"question": request.message, "chat_history": history_string, "context": ""})
+                logging.error(f"Agent produced unexpected output: {agent_response}")
+                response_text = "I encountered an error while trying to process your request."
+                break
+        
+        if not response_text:
+            logging.warning("Agent loop finished without a final answer. Synthesizing available information.")
+            if all_gathered_docs:
+                synthesis_chain = RESEARCH_SYNTHESIS_PROMPT | agent_llm | StrOutputParser()
+                context_string = format_docs(all_gathered_docs)
+                response_text = await synthesis_chain.ainvoke({
+                    "context": context_string,
+                    "original_question": request.message
+                })
+            else:
+                response_text = "I tried to find information on that, but I was unable to come up with an answer."
 
 
     # Save history and return response
     try:
-        history_to_save = [{"type": "human", "content": request.message}, {"type": "ai", "content": response_text}]
-        for message in history_to_save:
-            REDIS_CLIENT_INSTANCE.rpush(history_key, json.dumps(message))
+        REDIS_CLIENT_INSTANCE.rpush(history_key, json.dumps({"type": "human", "content": request.message}))
+        REDIS_CLIENT_INSTANCE.rpush(history_key, json.dumps({"type": "ai", "content": response_text}))
         
-        final_model_used = synthesis_llm.model_name
         return {
             "response": response_text, 
-            "model_used": final_model_used, 
+            "model_used": agent_llm.model_name, 
             "conversation_id": request.conversation_id, 
             "mode": mode
         }
