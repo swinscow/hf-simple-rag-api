@@ -7,6 +7,7 @@ import uuid
 from supabase import create_client, Client
 
 # --- CONFIGURATION ---
+# IMPORTANT: Replace with your actual URLs and Keys
 API_BASE_URL = "https://fastapi-backend-tq2s.onrender.com"  # <-- MAKE SURE THIS IS YOUR CORRECT BACKEND URL
 SUPABASE_URL = "https://nleucprtizqqofaitqcu.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5sZXVjcHJ0aXpxcW9mYWl0cWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjAwNDc3OTcsImV4cCI6MjA3NTYyMzc5N30.3y7GSxNsIcXGSVtcFmdkoR0W12jCOGAYYhkjk6HV4qg" # IMPORTANT: Use the ANON key, not the service key
@@ -19,7 +20,7 @@ except Exception as e:
     st.stop()
 
 st.set_page_config(layout="wide")
-st.title("Welcome to Pueblo. Globally-affordable AI that puts the user first. (MVP)")
+st.title("🧠 Open-Source LLM Platform")
 
 # --- SESSION STATE INITIALIZATION ---
 if 'auth_token' not in st.session_state:
@@ -73,14 +74,21 @@ def upload_and_index_document(file_to_upload):
         except requests.exceptions.RequestException as e:
             st.error(f"Failed to upload document: {e}")
 
-def clear_document():
+def clear_document_context():
     with st.spinner("Clearing document context..."):
         try:
             response = requests.post(f"{API_BASE_URL}/clear_document_context", headers=get_auth_headers())
             response.raise_for_status()
-            st.success(response.json().get("message", "Context cleared!"))
         except requests.exceptions.RequestException as e:
             st.error(f"Failed to clear context: {e}")
+
+def start_new_chat_session():
+    """Calls the backend to ensure all context is cleared."""
+    try:
+        response = requests.post(f"{API_BASE_URL}/start_new_chat", headers=get_auth_headers())
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        st.sidebar.error(f"Failed to start new session: {e}")
 
 def call_api_and_get_response(prompt_text):
     headers = {"Content-Type": "application/json", **get_auth_headers()}
@@ -110,6 +118,7 @@ def get_all_conversations():
 
 def load_conversation_history(conversation_id):
     try:
+        start_new_chat_session() # Clear any existing document context
         response = requests.get(f"{API_BASE_URL}/history/{conversation_id}", headers=get_auth_headers())
         response.raise_for_status()
         history = response.json().get("history", [])
@@ -132,14 +141,16 @@ else:
         st.header("Settings")
         st.session_state.model_key = st.selectbox("Select Model", options=["fast-chat", "smart-chat", "coding-expert"])
         
-        # Search Toggle
         st.session_state.use_search = st.toggle("Enable Internet Search", value=False)
         
         st.markdown("---")
+        
         if st.button("➕ Start New Chat", use_container_width=True):
+            start_new_chat_session() # Call the new backend endpoint first
             st.session_state.conversation_id = str(uuid.uuid4())
             st.session_state.messages = []
             st.rerun()
+            
         st.caption(f"Session: {st.session_state.conversation_id[:8]}...")
         st.markdown("---")
         
@@ -159,7 +170,7 @@ else:
             if st.button("Index Document", use_container_width=True):
                 upload_and_index_document(uploaded_file)
         if st.button("Clear Document Context", use_container_width=True):
-            clear_document()
+            clear_document_context()
         
         st.markdown("---")
         if st.button("Logout", use_container_width=True):

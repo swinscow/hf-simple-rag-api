@@ -75,10 +75,7 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/", include_in_schema=False)
 def health_check(): return {"status": "ok"}
 
-DOCUMENT_QA_PROMPT = """You are an expert Q&A assistant for user-provided documents.
-Your goal is to answer the user's QUESTION using the information from the DOCUMENT CONTEXT below.
-If the context is insufficient, you may use your general knowledge.
-IMPORTANT: Do not refer to the document or the context in your response. Answer the question directly and concisely as if you are an expert on the document's contents.
+DOCUMENT_QA_PROMPT = """You are an expert Q&A assistant for user-provided documents. Your goal is to answer the user's QUESTION using the information from the DOCUMENT CONTEXT below. If the context is insufficient, you may use your general knowledge. IMPORTANT: Do not refer to the document or the context in your response. Answer the question directly and concisely as if you are an expert on the document's contents.
 
 DOCUMENT CONTEXT:
 {context}
@@ -101,9 +98,7 @@ QUESTION:
 """
 pure_prompt = ChatPromptTemplate.from_template(PURE_CHAT_PROMPT)
 
-SEARCH_PROMPT = """You are a helpful research assistant. Answer the user's QUESTION using the provided WEB SEARCH RESULTS.
-Summarize the key information and provide a comprehensive answer.
-Cite your sources by including the URL at the end of relevant sentences.
+SEARCH_PROMPT = """You are a helpful research assistant. Answer the user's QUESTION using the provided WEB SEARCH RESULTS. Summarize the key information and provide a comprehensive answer. Cite your sources by including the URL at the end of relevant sentences.
 
 WEB SEARCH RESULTS:
 {context}
@@ -123,7 +118,6 @@ def get_llm_for_user(model_key: str):
     return ChatDeepInfra(model=model_id, temperature=0.7)
 
 def format_docs(docs: List[Document]) -> str:
-    # Add source to content for search results
     formatted_docs = []
     for doc in docs:
         content = doc.page_content
@@ -173,14 +167,8 @@ def google_search(query: str) -> List[Document]:
         ]
         logging.info(f"Google Search found {len(docs)} results for query: '{query}'")
         return docs
-    except ImportError:
-        logging.error("google-api-python-client is not installed. Please add it to requirements.txt.")
-        return []
     except Exception as e:
-        # --- THIS IS THE FIX ---
-        # This will now log the specific error from Google's servers.
         logging.error(f"Google Search failed with a specific API error: {e}", exc_info=True)
-        # ----------------------
         return []
 
 def manual_retriever(input_dict: dict) -> List[Document]:
@@ -230,6 +218,15 @@ async def upload_document(file: UploadFile = File(...), current_user: User = Sec
         return {"message": f"Document '{file.filename}' indexed. It is now the active document for chat."}
     else:
         raise HTTPException(status_code=500, detail="Failed to create RAG index.")
+
+# --- NEW: Dedicated endpoint for starting a new chat session ---
+@app.post("/start_new_chat")
+def start_new_chat(current_user: User = Security(get_current_user)):
+    """Clears the active document context for the user to start a fresh session."""
+    active_collection_key = get_user_active_collection_key(current_user.user_id)
+    REDIS_CLIENT_INSTANCE.delete(active_collection_key)
+    logging.info(f"Cleared document context for user {current_user.user_id} to start a new chat.")
+    return {"message": "New chat session started, context cleared."}
 
 @app.post("/clear_document_context")
 def clear_document_context(current_user: User = Security(get_current_user)):
