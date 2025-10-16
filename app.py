@@ -12,6 +12,7 @@ API_BASE_URL = "https://fastapi-backend-tq2s.onrender.com"  # <-- MAKE SURE THIS
 SUPABASE_URL = "https://nleucprtizqqofaitqcu.supabase.co"
 SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5sZXVjcHJ0aXpxcW9mYWl0cWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjAwNDc3OTcsImV4cCI6MjA3NTYyMzc5N30.3y7GSxNsIcXGSVtcFmdkoR0W12jCOGAYYhkjk6HV4qg" # IMPORTANT: Use the ANON key, not the service key
 
+
 # --- INITIALIZE SUPABASE CLIENT ---
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -33,6 +34,8 @@ if 'messages' not in st.session_state:
     st.session_state.messages = []
 if 'use_search' not in st.session_state:
     st.session_state.use_search = False
+if 'active_document' not in st.session_state:
+    st.session_state.active_document = None
 
 
 # --- AUTHENTICATION LOGIC ---
@@ -64,6 +67,18 @@ def show_login_form():
 def get_auth_headers():
     return {"Authorization": f"Bearer {st.session_state.auth_token}"}
 
+def check_active_document():
+    """Asks the backend if a document is currently active for the user."""
+    try:
+        response = requests.get(f"{API_BASE_URL}/get_active_document", headers=get_auth_headers())
+        response.raise_for_status()
+        data = response.json()
+        st.session_state.active_document = data.get("active_filename")
+    except requests.exceptions.RequestException:
+        # Don't show an error, just fail silently
+        st.session_state.active_document = None
+
+
 def upload_and_index_document(file_to_upload):
     with st.spinner("Uploading and indexing document..."):
         files = {"file": (file_to_upload.name, file_to_upload, "application/pdf")}
@@ -71,24 +86,21 @@ def upload_and_index_document(file_to_upload):
             response = requests.post(f"{API_BASE_URL}/upload_document", headers=get_auth_headers(), files=files)
             response.raise_for_status()
             st.success(response.json().get("message", "Document indexed successfully!"))
+            st.session_state.active_document = file_to_upload.name # Optimistically update UI
+            st.rerun()
         except requests.exceptions.RequestException as e:
             st.error(f"Failed to upload document: {e}")
 
-def clear_document_context():
-    with st.spinner("Clearing document context..."):
-        try:
-            response = requests.post(f"{API_BASE_URL}/clear_document_context", headers=get_auth_headers())
-            response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            st.error(f"Failed to clear context: {e}")
 
 def start_new_chat_session():
     """Calls the backend to ensure all context is cleared."""
-    try:
-        response = requests.post(f"{API_BASE_URL}/start_new_chat", headers=get_auth_headers())
-        response.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        st.sidebar.error(f"Failed to start new session: {e}")
+    with st.spinner("Starting new chat..."):
+        try:
+            response = requests.post(f"{API_BASE_URL}/start_new_chat", headers=get_auth_headers())
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            st.sidebar.error(f"Failed to start new session: {e}")
+
 
 def call_api_and_get_response(prompt_text):
     headers = {"Content-Type": "application/json", **get_auth_headers()}
@@ -136,12 +148,16 @@ def load_conversation_history(conversation_id):
 if not st.session_state.auth_token:
     show_login_form()
 else:
+    # On first run after login, check for an active document
+    if st.session_state.active_document is None:
+        check_active_document()
+
     # --- SIDEBAR ---
     with st.sidebar:
         st.header("Settings")
         st.session_state.model_key = st.selectbox("Select Model", options=["fast-chat", "smart-chat", "coding-expert"])
         
-        st.session_state.use_search = st.toggle("Enable Internet Search", value=False)
+        st.session_state.use_search = st.toggle("Enable Internet Search", value=False, disabled=(st.session_state.active_document is not None))
         
         st.markdown("---")
         
@@ -149,6 +165,7 @@ else:
             start_new_chat_session() # Call the new backend endpoint first
             st.session_state.conversation_id = str(uuid.uuid4())
             st.session_state.messages = []
+            st.session_state.active_document = None # Clear local document state
             st.rerun()
             
         st.caption(f"Session: {st.session_state.conversation_id[:8]}...")
@@ -165,17 +182,20 @@ else:
         
         st.markdown("---")
         st.subheader("RAG Document")
-        uploaded_file = st.file_uploader("Upload PDF to chat with", type="pdf")
-        if uploaded_file:
-            if st.button("Index Document", use_container_width=True):
-                upload_and_index_document(uploaded_file)
-        if st.button("Clear Document Context", use_container_width=True):
-            clear_document_context()
+        if st.session_state.active_document:
+            st.info(f"Active document: **{st.session_state.active_document}**")
+            st.caption("Click 'Start New Chat' to clear the document.")
+        else:
+            uploaded_file = st.file_uploader("Upload PDF to chat with", type="pdf")
+            if uploaded_file:
+                if st.button("Index Document", use_container_width=True):
+                    upload_and_index_document(uploaded_file)
         
         st.markdown("---")
         if st.button("Logout", use_container_width=True):
             st.session_state.auth_token = None
             st.session_state.user_id = None
+            st.session_state.active_document = None
             st.rerun()
 
     # --- CHAT INTERFACE ---
