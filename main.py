@@ -107,20 +107,33 @@ RESEARCH_AGENT_PROMPT = ChatPromptTemplate.from_template("""You are an expert-le
 {question}
 """)
 
-ROUTER_PROMPT = ChatPromptTemplate.from_template("""You are an expert query classifier. Your task is to analyze the user's LATEST QUESTION in the context of the CHAT HISTORY and determine the best way to answer it.
+ROUTER_PROMPT = ChatPromptTemplate.from_template("""You are a hyper-efficient query routing assistant. Your sole job is to analyze the user's LATEST QUESTION and determine if a web search is absolutely necessary to answer it.
 
-Classify the LATEST QUESTION into one of three categories:
-1.  `RESEARCH_REQUIRED`: The question is complex, seeks real-time information (recent events, news), requires deep specialist knowledge, or explicitly asks for research.
-2.  `GENERAL_KNOWLEDGE`: The question can be answered using general knowledge and does not require a web search. This includes definitions, historical facts, or simple explanations.
-3.  `CONVERSATIONAL`: The question is a simple conversational follow-up, a greeting, a thank you, or an instruction that doesn't require new information.
+**CRITICAL RULES:**
+- A web search is **REQUIRED** if the question involves:
+  - Any recent or future dates (e.g., "yesterday," "next week," "in October 2025").
+  - Real-time information (e.g., "what is the stock price of...?", "latest news," "weather today").
+  - Very specific or niche topics, people, or products that are not common knowledge.
+- A web search is **NOT** required for:
+  - General knowledge, historical facts, definitions (e.g., "Who was Shakespeare?", "What is gravity?").
+  - Simple conversational follow-ups (e.g., "Thank you," "Tell me more," "Can you rephrase that?").
 
+**EXAMPLES:**
+- User Question: "What were the main UK news headlines on October 15th, 2025?" -> **Classification: RESEARCH_REQUIRED** (Reason: Specific future date requires real-time news lookup).
+- User Question: "Who was the first person on the moon?" -> **Classification: GENERAL_KNOWLEDGE** (Reason: A well-established historical fact).
+- User Question: "That's interesting, thanks!" -> **Classification: CONVERSATIONAL** (Reason: Simple conversational response).
+
+---
+**CONTEXT:**
 CHAT HISTORY:
 {chat_history}
 
 LATEST QUESTION:
 {question}
 
-Respond with a JSON object containing your classification. Example: {{"query_type": "RESEARCH_REQUIRED"}}""")
+---
+Respond with a JSON object containing your classification based on the rules and examples above.
+Example: {{"query_type": "RESEARCH_REQUIRED"}}""")
 
 # --- 5. Core Helper and Agent Functions ---
 # ✅ CORRECTED: All helper functions are now fully included.
