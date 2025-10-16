@@ -1,4 +1,4 @@
-# app.py - FINAL STABLE VERSION
+# app.py - FINAL VERSION (Router Always On)
 
 import streamlit as st
 import requests
@@ -10,7 +10,7 @@ from supabase import create_client, Client
 # IMPORTANT: Replace with your actual URLs and Keys
 API_BASE_URL = "https://fastapi-backend-tq2s.onrender.com"  # <-- MAKE SURE THIS IS YOUR CORRECT BACKEND URL
 SUPABASE_URL = "https://nleucprtizqqofaitqcu.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5sZXVjcHJ0aXpxcW9mYWl0cWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjAwNDc3OTcsImV4cCI6MjA3NTYyMzc5N30.3y7GSxNsIcXGSVtcFmdkoR0W12jCOGAYYhkjk6HV4qg" # IMPORTANT: Use the ANON key, not the service key
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5sZXVjcHJ0aXpxcW9mYWl0cWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjAwNDc3OTcsImV4cCI6MjA3NTYyMzc5N30.3y7GSxNsIcXGSVtcFmdkoR0W12jCOGAYYhkjk6HV4qg" # IMPORTANT: Use the ANON key
 
 
 # --- INITIALIZE SUPABASE CLIENT ---
@@ -21,7 +21,7 @@ except Exception as e:
     st.stop()
 
 st.set_page_config(layout="wide")
-st.title("🧠 Open-Source LLM Platform")
+st.title("Welcome to Pueblo ai (MVP)")
 
 # --- SESSION STATE INITIALIZATION ---
 if 'auth_token' not in st.session_state:
@@ -32,10 +32,6 @@ if 'conversation_id' not in st.session_state:
     st.session_state.conversation_id = str(uuid.uuid4())
 if 'messages' not in st.session_state:
     st.session_state.messages = []
-if 'use_search' not in st.session_state:
-    st.session_state.use_search = False
-if 'use_premium_search' not in st.session_state: # NEW: Added premium search state
-    st.session_state.use_premium_search = False
 if 'active_document' not in st.session_state:
     st.session_state.active_document = None
 
@@ -105,13 +101,14 @@ def start_new_chat_session():
 
 def call_api_and_get_response(prompt_text):
     headers = {"Content-Type": "application/json", **get_auth_headers()}
-    # MODIFIED: Added the new 'use_premium_search' flag to the payload
+    
+    # ✅ MODIFIED: The router is now always considered active by default.
+    # The backend will ignore this flag if a document RAG session is active.
     payload = {
         "conversation_id": st.session_state.conversation_id,
         "model_key": st.session_state.model_key,
         "message": prompt_text,
-        "use_search": st.session_state.use_search,
-        "use_premium_search": st.session_state.use_premium_search
+        "use_search": True 
     }
     try:
         response = requests.post(f"{API_BASE_URL}/chat", headers=headers, data=json.dumps(payload))
@@ -159,13 +156,9 @@ else:
         st.header("Settings")
         st.session_state.model_key = st.selectbox("Select Model", options=["fast-chat", "smart-chat", "coding-expert"])
         
-        # MODIFIED: Added logic for the new premium search toggle
-        is_rag_active = st.session_state.active_document is not None
-        st.session_state.use_search = st.toggle("Enable Internet Search", value=False, disabled=is_rag_active)
+        # ✅ MODIFIED: The search toggle has been completely removed for a cleaner UI.
+        # The intelligent router in the backend now handles everything automatically.
         
-        if st.session_state.use_search:
-            st.session_state.use_premium_search = st.toggle("✨ Premium Search (Tavily)", value=False, help="Uses a more advanced search provider for higher quality results at a higher cost.")
-
         st.markdown("---")
         
         if st.button("➕ Start New Chat", use_container_width=True):
@@ -191,9 +184,10 @@ else:
         st.subheader("RAG Document")
         if st.session_state.active_document:
             st.info(f"Active document: **{st.session_state.active_document}**")
-            st.caption("Click 'Start New Chat' to clear the document.")
+            st.caption("Internet search is disabled when a document is active.")
         else:
-            uploaded_file = st.file_uploader("Upload PDF to chat with", type="pdf")
+            st.info("Smart Search is active by default.")
+            uploaded_file = st.file_uploader("Upload PDF to override search", type="pdf")
             if uploaded_file:
                 if st.button("Index Document", use_container_width=True):
                     upload_and_index_document(uploaded_file)
