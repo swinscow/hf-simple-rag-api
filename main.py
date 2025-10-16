@@ -1,4 +1,4 @@
-# main.py - FINAL DEFINITIVE VERSION (Self-Correcting Search Agent)
+# main.py - FINAL DEFINITIVE VERSION (Corrected Self-Correcting Agent)
 
 # --- 1. Dependencies and Setup ---
 from fastapi import FastAPI, UploadFile, File, HTTPException, Security
@@ -318,11 +318,12 @@ async def chat_with_rag(request: ChatRequest, current_user: User = Security(get_
             
             decision = first_pass_result['output']
             
-            if isinstance(decision, SearchDecision) and decision.requires_search:
-                logging.info(f"First pass decided search is required. Query: '{decision.search_query}'")
+            # ✅ CORRECTED: Check for keys in the dictionary, not the instance type.
+            if 'requires_search' in decision and decision['requires_search']:
+                logging.info(f"First pass decided search is required. Query: '{decision['search_query']}'")
                 mode = "RESEARCH_AGENT (Self-Corrected)"
                 
-                documents = await run_tavily_research_agent(decision.search_query)
+                documents = await run_tavily_research_agent(decision['search_query'])
                 if not documents:
                     response_text = "I tried to search for that, but I couldn't find enough information online."
                 else:
@@ -330,22 +331,21 @@ async def chat_with_rag(request: ChatRequest, current_user: User = Security(get_
                     synthesis_chain = RESEARCH_AGENT_PROMPT | synthesis_llm | StrOutputParser()
                     response_text = await synthesis_chain.ainvoke({"context": context_string, "question": request.message})
             
-            elif isinstance(decision, FinalAnswer):
+            elif 'answer' in decision:
                 logging.info("First pass answered directly from knowledge.")
                 mode = "PURE_CHAT (Confident Answer)"
-                response_text = decision.answer
+                response_text = decision['answer']
             
             else:
-                logging.error(f"Unexpected output type from first pass: {type(decision)}")
+                logging.error(f"Unexpected output structure from first pass: {decision}")
                 response_text = "I encountered an unexpected error while processing your request."
                 mode = "ERROR"
 
         except Exception as e:
             logging.error(f"Error during self-correcting agent execution: {e}", exc_info=True)
-            # Fallback to simple chat if the structured output fails
             mode = "PURE_CHAT (Fallback)"
-            fallback_chain = PURE_CHAT_PROMPT | llm_instance | StrOutputParser()
-            response_text = await fallback_chain.ainvoke({"question": request.message, "chat_history": history_string})
+            fallback_chain = DOCUMENT_QA_PROMPT | llm_instance | StrOutputParser()
+            response_text = await fallback_chain.ainvoke({"question": request.message, "chat_history": history_string, "context": ""})
 
 
     # Save history and return response
